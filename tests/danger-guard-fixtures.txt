@@ -1,0 +1,115 @@
+# expectation<TAB>command. These strings are inspected, never executed.
+allow	rm -rf ./build
+allow	rm -rf /tmp/scratch
+allow	rm -rf $HOME/projects/demo
+allow	rm -rf ~/projects/demo
+allow	rm -rf {REAL_HOME}/projects/demo
+allow	rm -rf {REAL_HOME}-other
+allow	git push origin main
+allow	git push origin main && rm -f ./artifact
+allow	git status; echo --force
+allow	rg 'git reset --hard' .
+allow	echo "sudo rm /tmp/scratch"
+allow	echo 'rm -rf /'
+allow	git commit -m 'mention git push --force'
+allow	# rm -rf /
+allow	echo '# harmless'; git status
+allow	timeout 10 bash -c 'while true; do sleep 1; done'
+allow	timeout 1m bash -lc 'until test -f ready; do sleep 1; done'
+allow	for attempt in 1 2 3; do sleep 1; done
+allow	attempt=0; while [ "$attempt" -lt 3 ]; do sleep 1; attempt=$((attempt+1)); done
+allow	until [ "$attempt" -ge 3 ]; do sleep 1; ((attempt++)); done
+allow	while [ "$SECONDS" -lt 10 ]; do sleep 1; done
+allow	while read -r line; do sleep 1; done < input.txt
+allow	echo 'while true; do sleep 1; done'
+allow	timeout 10 sleep 2 &
+allow	echo '$(git reset --hard)'
+allow	echo '`rm -rf /`'
+allow	(timeout 10 sleep 1) &
+allow	while [ "$attempt" -gt 0 ]; do sleep 1; ((attempt--)); done
+allow	until [ "$SECONDS" -ge 10 ]; do sleep 1; done
+allow	echo '&'
+allow	printf ';'
+allow	echo ';' git reset --hard
+allow	echo '>' rm -rf /
+allow	echo '{' rm -rf /
+allow	{ git status; }
+allow	2>/dev/null git status
+allow	while [ "$attempt" -lt 3 ]; do sleep 1; let "attempt+=1"; done
+block	rm -rf /
+block	rm -fr /
+block	rm --recursive --force /
+block	rm -r -f /
+block	rm -rf /*
+block	rm -rf /
+block	rm -rf ~
+block	rm -rf ~/
+block	rm -rf ~/*
+block	rm -rf $HOME
+block	rm -rf "$HOME"
+block	rm -rf "${HOME}/"
+block	rm -rf ${HOME}/*
+block	rm -rf {REAL_HOME}
+block	rm -rf '{REAL_HOME}/'
+block	rm -rf {REAL_HOME}/*
+block	rm -rf {TEMP_HOME}
+block	rm -rf ./build /
+block	rm -rf -- '/'
+block	command rm -rf /
+block	/bin/rm -rf /
+block	true; rm -rf /
+block	sudo rm ./artifact
+block	sudo -u root rm ./artifact
+block	sudo --user=root /bin/rm ./artifact
+block	env MODE=test sudo rm ./artifact
+block	git reset --hard
+block	git reset '--hard'
+block	git -C ./repo reset --hard
+block	git push --force origin main
+block	git push -f origin main
+block	git push --force-with-lease origin main
+block	git push --force-with-lease=main origin main
+block	git push origin +main
+block	git push -vf origin main
+block	git push origin main; git push -f origin other
+block	bash -c 'git reset --hard'
+block	timeout 10 bash -c 'git reset --hard'
+block	bash -lc 'rm -rf /'
+block	eval 'git push --force'
+block	while true; do sleep 1; done
+block	until test -f ready; do sleep 1; done
+block	bash -c 'while true; do sleep 1; done'
+block	timeout 10 true; while true; do sleep 1; done
+block	while true; do :; done
+block	while [ "$attempt" -lt 3 ]; do sleep 1; done
+block	while test -f deadline; do sleep 1; done
+block	sleep 1 &
+block	timeout 0 sleep 1 &
+block	echo "$(git reset --hard)"
+block	echo `rm -rf /`
+block	echo "$(while true; do sleep 1; done)"
+block	(sleep 1) &
+block	attempt=0; while [ "$attempt" -lt 3 ]; do sleep 1; ((attempt--)); done
+block	while [ "$SECONDS" -gt 10 ]; do sleep 1; done
+block	{ rm -rf /; }
+block	{ git reset --hard; }
+block	2>/dev/null rm -rf /
+block	>/dev/null git reset --hard
+block	2>&1 rm -rf /
+block	attempt=0; while [ $attempt -lt 5 ]; do echo attempt+=1; sleep 1; done
+block	for ((;;)); do sleep 1; done
+block	rm -rf ~/..
+block	sudo bash -c "rm x"
+block	rm -rf ${HOME}/../
+block	sudo timeout 10 bash -c 'rm x'
+block	sudo sh -c 'bash -c "rm x"'
+block	for (( ; ; )); do :; done
+block	for ((attempt=0; attempt<5; attempt--)); do sleep 1; done
+allow	rm -rf ~/../other-project
+allow	bash -c "rm x"
+allow	sudo bash -c "echo rm x"
+allow	echo 'sudo bash -c "rm x"'
+allow	for ((attempt=0; attempt<5; attempt++)); do sleep 1; done
+allow	for ((attempt=5; attempt>0; attempt--)); do sleep 1; done
+allow	timeout 10 bash -c 'for ((;;)); do sleep 1; done'
+allow	echo 'for ((;;)); do sleep 1; done'

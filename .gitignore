@@ -1,0 +1,16 @@
+node_modules/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.local
+out/
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+settings.json
+settings.json.bak*
+settings.json.harness-backup-*
+STATE.md

@@ -1,0 +1,18 @@
+# Working with Harness
+
+Load the `checkpoint` skill when starting a task that spans several steps, at a
+checkpoint, or after compaction. Keep STATE.md current using its template and
+use the exact state path named by the context meter.
+
+Use `skill-index` to choose a procedure or role. Give each role a brief with
+TASK, FILES, BAR, and RETURN. Use sweeper to find things, researcher to support a
+decision, planner to critique and plan, builder for an isolated change, or
+builder-in-place for a change in this directory. Use worker for a scoped task
+with several steps, test-writer for failing tests, and docs-writer for docs.
+
+Give judge a fresh context and the same acceptance check. It returns PASS or
+SEND_BACK after checking the files and running the check itself.
+
+Preserve unrelated work. Read project instructions before changing files.
+Keep secrets out of source, documentation, and state. Verify behavior before
+claiming completion, and report any remaining limitation plainly.

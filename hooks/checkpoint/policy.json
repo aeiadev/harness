@@ -1,0 +1,8 @@
+{
+  "checkpoint_path": "STATE.md",
+  "remind_at": 180000,
+  "urgent_at": 240000,
+  "window_tokens": 280000,
+  "repeat_after": 12000,
+  "restore_bytes": 4000
+}

@@ -1,0 +1,16 @@
+# Working with Harness in Codex
+
+Load the `checkpoint` skill for tasks spanning several steps. Keep STATE.md current
+at checkpoints and use the exact state path named by the context meter.
+After compaction, recover from the injected checkpoint and read the full file
+when the injection says it was truncated.
+
+Give each role a scoped TASK, FILES, BAR, and RETURN. Use sweeper to find things,
+researcher for evidence, planner for a plan, builder for an isolated change,
+builder-in-place for this directory, worker for several steps, test-writer for
+failing tests, and docs-writer for documentation. Give judge fresh context and
+the same acceptance check.
+
+Preserve unrelated work. Read project instructions before edits. Keep secrets
+out of source and state. Verify behavior before claiming completion. The spend
+side file is an estimate when rates are configured and displays $-- otherwise.

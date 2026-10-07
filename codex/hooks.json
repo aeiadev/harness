@@ -1,0 +1,136 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.codex/harness/hooks/context/inject-project-context.sh\"",
+            "timeout": 10,
+            "additionalContextLimit": 4000
+          }
+        ]
+      },
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.codex/harness/hooks/context/inject-project-context.sh\" --reset",
+            "timeout": 10,
+            "additionalContextLimit": 4000
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/harness/hooks/checkpoint/dispatch.py\" restore --host=codex",
+            "timeout": 10,
+            "additionalContextLimit": 4000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.codex/harness/hooks/context/inject-project-context.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|(?:functions\\.)?(?:exec_command|shell_command)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.codex/harness/hooks/guard/danger-cmd-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/harness/hooks/checkpoint/dispatch.py\" check --host=codex",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/harness/statusline/spend_hook.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|(?:functions\\.)?apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.codex/harness/hooks/helpers/auto-format.sh\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|(?:functions\\.)?(?:exec_command|shell_command)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.codex/harness/hooks/helpers/verify-patch-landed-auto.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/harness/hooks/checkpoint/dispatch.py\" archive --host=codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.codex/harness/hooks/helpers/stop-check-verify-patch.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/harness/statusline/spend_hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/harness/hooks/checkpoint/dispatch.py\" snapshot --host=codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
