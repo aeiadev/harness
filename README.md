@@ -22,9 +22,11 @@ The guard runs before shell commands. Helpers and the context meter run after
 tools. At compaction, the state hooks preserve the written checkpoint. A fresh
 judge checks the result against the brief before it counts as complete.
 
-Router is a separate repository that plugs into this setup. Router chooses where
-a job goes; Harness provides the hooks, skills, and roles the job runs with.
-Harness works without Router.
+Router is a separate repository that adds automatic routing. Set its mode with
+`router auto off|suggest|nudge|enforce`; the default is `nudge`. Its installer can
+add optional written delegation defaults with `install.sh --with-defaults`.
+Router and Harness use the same nine role names. Harness also works alone: the
+main session chooses roles itself.
 
 ## Install
 
@@ -80,11 +82,20 @@ bash install.sh --uninstall
 ```
 
 Uninstall removes the hook entries and unchanged files recorded by the installer.
-It preserves user additions and changed files. If customized or pre-existing
-settings still invoke Harness, it keeps and reports the runtime files they need.
+It removes event keys emptied by that removal and keeps lists that were already
+empty or still contain other hooks. It preserves user additions and changed files.
+If customized or pre-existing settings still invoke Harness, it keeps and
+reports the runtime files they need.
 Remove those references and run `--uninstall` again to finish cleanup.
 When Harness replaced a previous statusline, uninstall restores that value if the installed statusline is still
 active. Review reported leftovers before deleting anything by hand.
+
+Harness and Router share the nine role files on both hosts. Harness claims an
+identical shared role file in its install manifest. Router does the same from
+Router 0.2. Harness uninstall keeps shared roles
+listed in Router's install manifest. If that manifest cannot be read or is invalid,
+Harness keeps the roles and reports why. Uninstall the remaining package to remove
+its unchanged role files.
 
 ## Quick start
 
@@ -107,7 +118,7 @@ RETURN: CHANGED / BAR / OUTPUT / NOT DONE / OPEN
 
 Use `builder` for an isolated Git worktree or `builder-in-place` for a bounded
 change in the current directory. The caller chooses the role and supplies its
-scope. Installing Harness does not automatically dispatch tasks to agents.
+scope. With Router installed, it can suggest a role or require delegation.
 
 | Role | Job | Claude | Codex model / effort |
 | --- | --- | --- | --- |
@@ -126,6 +137,8 @@ The Codex roles use `developer_instructions` from the matching `agents/*.md`
 body. Run `python3 codex/generate_agents.py` after editing source roles;
 `python3 codex/generate_agents.py --check` checks for drift. Tests assert that
 names, instructions, and model tiers remain in sync.
+The nine Markdown role files are pinned in `agents/SHARED.sha256`. Router uses
+the same role names and byte-identical Markdown files when both are installed.
 
 To use a role in Claude Code, ask the coordinator to use the role and provide its brief. For example: “Use the `sweeper` role to find every checkpoint configuration file, make no edits, and return the paths.” In Codex, request the named role in the session instructions, for example: “Use the `builder-in-place` role. TASK: Reject an empty title. FILES: src/title.py tests/test_title.py. BAR: timeout 60 python3 tests/test_title.py. RETURN: changed files and BAR output.” Codex receives the role instructions from the installed TOML file. Its requested read-only behavior is not enforced by that file; use the parent session permission profile when enforcement matters.
 Claude Code tool allowlists still apply to the Markdown roles. On Codex,

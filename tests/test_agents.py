@@ -29,6 +29,12 @@ EXPECTED_MODELS = {
 READ_ONLY_ROLES = {"sweeper", "researcher", "planner", "judge"}
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"}
 ALL_TOOLS = READ_ONLY_TOOLS | {"Write", "Edit"}
+EXPECTED_TURNS = {"sweeper": 30, "researcher": 40, "planner": 40,
+                  "judge": 40, "builder": 80, "builder-in-place": 80,
+                  "worker": 80, "test-writer": 80, "docs-writer": 80}
+RETURN_LIMITS = {"sweeper": 3000, "researcher": 5000, "planner": 5000,
+                 "judge": 1500, "builder": 1500, "builder-in-place": 1500,
+                 "worker": 5000, "test-writer": 1500, "docs-writer": 1500}
 
 
 def parse_agent(path):
@@ -110,6 +116,8 @@ class AgentTests(unittest.TestCase):
                 names.append(name)
                 self.assertEqual(name, path.stem, "agent name must match its filename")
                 self.assertEqual(metadata["model"], EXPECTED_MODELS[name])
+                self.assertEqual(metadata.get("maxTurns"), str(EXPECTED_TURNS[name]))
+                self.assertNotRegex(metadata["description"], r"(?i)router|seat-")
                 self.assertGreater(len(metadata["description"].split()), 8)
                 tools = [item.strip() for item in metadata["tools"].split(",")]
                 self.assertTrue(all(tools), "tools must not include empty entries")
@@ -117,6 +125,14 @@ class AgentTests(unittest.TestCase):
                 self.assertTrue(set(tools) <= ALL_TOOLS, "agent has an unexpected tool")
                 for section in ("## Job", "## Must not", "## Return"):
                     self.assertIn(section, body, f"{path.name}: missing {section}")
+                self.assertIn(f"{RETURN_LIMITS[name]} characters", body)
+                self.assertRegex(body, r"(?is)longer material.*file.*name.*return")
+                if name in {"builder", "builder-in-place", "worker", "test-writer", "docs-writer"}:
+                    for label in ("CHANGED:", "BAR:", "OUTPUT:", "NOT DONE:", "OPEN:"):
+                        self.assertIn(label, body)
+                if name == "judge":
+                    self.assertRegex(body, r"(?i)numbered findings")
+                    self.assertIn("Return one verdict line", body)
                 self.assertNotIn(chr(0x2014), body, "agent text must not contain em dashes")
         self.assertEqual(len(names), len(set(names)), "agent names must be unique")
 
@@ -385,6 +401,79 @@ class InstallTests(unittest.TestCase):
         self.run_install("--uninstall")
         self.assertEqual(self.settings(), initial)
 
+    def test_uninstall_removes_only_event_lists_emptied_by_harness(self):
+        self.write_settings({"hooks": {"PreToolUse": [], "OtherEvent": []}, "user": "keep"})
+        self.run_install()
+        host_home = self.codex_home if isinstance(self, CodexInstallTests) else self.claude_home
+        manifest = json.loads((host_home / "harness/install-manifest.json").read_text())
+        self.assertEqual(set(manifest["existing_empty_events"]), {"PreToolUse", "OtherEvent"})
+        installed = self.settings()
+        installed["hooks"]["PostCompact"] = []  # User emptied this after install.
+        installed["hooks"]["PostToolUse"][0]["hooks"].append(
+            {"type": "command", "command": "echo other-tool"}
+        )
+        self.write_settings(installed)
+        self.run_install("--uninstall")
+        self.assertEqual(self.settings(), {
+            "hooks": {
+                "PreToolUse": [],
+                "OtherEvent": [],
+                "PostCompact": [],
+                "PostToolUse": [{"hooks": [{"type": "command", "command": "echo other-tool"}]}],
+            },
+            "user": "keep",
+        })
+
+    def test_uninstall_removes_event_whose_original_other_hook_was_later_removed(self):
+        other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo other-tool"}]}
+        self.write_settings({"hooks": {"PreToolUse": [other]}})
+        self.run_install()
+        installed = self.settings()
+        host_home = self.codex_home if isinstance(self, CodexInstallTests) else self.claude_home
+        manifest = json.loads((host_home / "harness/install-manifest.json").read_text())
+        self.assertNotIn("PreToolUse", manifest["existing_empty_events"],
+                         "an event with another hook at install must not count as empty")
+        installed["hooks"]["PreToolUse"].remove(other)
+        self.write_settings(installed)
+        self.run_install("--uninstall")
+        self.assertEqual(self.settings(), {"hooks": {}},
+                         "uninstall left an empty event whose original hook was removed")
+
+    def test_uninstall_keeps_other_hook_present_at_install(self):
+        other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo other-tool"}]}
+        initial = {"hooks": {"PreToolUse": [other]}}
+        self.write_settings(initial)
+        self.run_install()
+        self.run_install("--uninstall")
+        self.assertEqual(self.settings(), initial)
+
+    def test_upgrade_legacy_event_manifest_does_not_keep_nonempty_event(self):
+        other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo other-tool"}]}
+        self.write_settings({"hooks": {"PreToolUse": [other]}})
+        self.run_install()
+        host_home = self.codex_home if isinstance(self, CodexInstallTests) else self.claude_home
+        manifest_path = host_home / "harness/install-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest.pop("existing_empty_events")
+        manifest["existing_events"] = ["PreToolUse"]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.run_install()
+        upgraded = json.loads(manifest_path.read_text())
+        self.assertNotIn("PreToolUse", upgraded["existing_empty_events"])
+        installed = self.settings()
+        installed["hooks"]["PreToolUse"].remove(other)
+        self.write_settings(installed)
+        self.run_install("--uninstall")
+        self.assertEqual(self.settings(), {"hooks": {}},
+                         "legacy manifest left an event whose original hook was removed")
+
+    def test_examples_point_to_router_defaults(self):
+        for name in ("CLAUDE.md.example", "AGENTS.md.example"):
+            with self.subTest(name=name):
+                example = (ROOT / "examples" / name).read_text(encoding="utf-8")
+                self.assertIn("--with-defaults", example,
+                              f"{name} must point readers to Router delegation defaults")
+
     def check_retained_runtime(self, kind, custom_home):
         self.user_home = self.root / f"user-{kind}-{custom_home}"
         self.user_home.mkdir()
@@ -473,7 +562,7 @@ class InstallTests(unittest.TestCase):
         self.assertFalse((self.claude_home / "harness/install-manifest.json").exists())
         self.run_install("--uninstall")
 
-    def test_matching_preexisting_hooks_and_files_remain_unowned(self):
+    def test_matching_preexisting_hooks_remain_unowned_but_shared_role_is_claimed(self):
         expected = json.loads((self.source / "examples" / "settings.example.json").read_text())
         initial = {"hooks": {"PreToolUse": copy.deepcopy(expected["hooks"]["PreToolUse"])}}
         initial["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 25
@@ -485,7 +574,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(len(self.settings()["hooks"]["PreToolUse"]), 1)
         self.run_install("--uninstall")
         self.assertEqual(self.settings(), initial)
-        self.assertTrue(path.is_file())
+        self.assertFalse(path.exists())
 
     def test_invalid_settings_fail_without_writes(self):
         self.claude_home.mkdir()
@@ -544,6 +633,10 @@ class InstallTests(unittest.TestCase):
 
 class CodexInstallTests(unittest.TestCase):
     snapshot = InstallTests.snapshot
+    test_uninstall_removes_only_event_lists_emptied_by_harness = InstallTests.test_uninstall_removes_only_event_lists_emptied_by_harness
+    test_uninstall_removes_event_whose_original_other_hook_was_later_removed = InstallTests.test_uninstall_removes_event_whose_original_other_hook_was_later_removed
+    test_uninstall_keeps_other_hook_present_at_install = InstallTests.test_uninstall_keeps_other_hook_present_at_install
+    test_upgrade_legacy_event_manifest_does_not_keep_nonempty_event = InstallTests.test_upgrade_legacy_event_manifest_does_not_keep_nonempty_event
 
     def setUp(self):
         InstallTests.setUp(self)

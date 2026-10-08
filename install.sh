@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
@@ -63,6 +64,50 @@ def read_json(path, fallback):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+SHARED_ROLES = frozenset(
+    f"agents/{name}{extension}"
+    for name in ("sweeper", "researcher", "planner", "builder", "builder-in-place",
+                 "judge", "worker", "test-writer", "docs-writer")
+    for extension in (".md", ".toml")
+)
+
+
+def router_manifest():
+    """Return a valid Router manifest, or None when it is unsafe to trust."""
+    sibling = home / "router" / "install-manifest.json"
+    try:
+        if sibling.is_symlink() or not sibling.is_file():
+            return None
+        value = json.loads(sibling.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("files"), dict) or not isinstance(value.get("hooks"), list):
+            return None
+        for relative, fingerprint in value["files"].items():
+            if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                return None
+            if not isinstance(fingerprint, dict) or len(fingerprint) != 1:
+                return None
+            if "sha256" in fingerprint:
+                if not isinstance(fingerprint["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint["sha256"]) is None:
+                    return None
+            elif "link" in fingerprint:
+                if not isinstance(fingerprint["link"], str):
+                    return None
+            else:
+                return None
+        return value
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+
+
+def router_shared_files():
+    """Return Router's claimed paths, or None when its manifest is unsafe to trust."""
+    sibling = home / "router" / "install-manifest.json"
+    if not sibling.exists() and not sibling.is_symlink():
+        return set()
+    value = router_manifest()
+    return set(value["files"]) if value is not None else None
 
 
 def safe_path(relative):
@@ -190,6 +235,13 @@ def main():
         fail("unsupported install manifest version")
     previous_files = manifest.get("files", {})
     owned_hooks = manifest.get("hooks", {})
+    existing_empty_events = manifest.get("existing_empty_events")
+    if existing_empty_events is None:
+        empty_now = [event for event, groups in original.get("hooks", {}).items() if groups == []]
+        # Earlier 0.2 manifests recorded every existing event. For those installs,
+        # only an event still empty before this run can safely be treated as empty.
+        existing_empty_events = ([event for event in manifest["existing_events"] if event in empty_now]
+                                 if "existing_events" in manifest else empty_now)
     judge_permissions = manifest.get("judge_permissions")
     config_path = None
     config_original = config_updated = None
@@ -213,6 +265,7 @@ def main():
             return
         for event, groups in owned_hooks.items():
             current = settings.get("hooks", {}).get(event, [])
+            removed_from_event = False
             for owned in groups:
                 for group in list(current):
                     if group_metadata(group) != group_metadata(owned):
@@ -222,11 +275,12 @@ def main():
                         if hook in group["hooks"]:
                             group["hooks"].remove(hook)
                             removed_owned_hook = True
+                            removed_from_event = True
                     if removed_owned_hook and not group["hooks"]:
                         current.remove(group)
-            if not current and event not in manifest.get("existing_events", []):
+            if removed_from_event and not current and event not in existing_empty_events:
                 settings.get("hooks", {}).pop(event, None)
-        if not settings.get("hooks") and not manifest.get("had_hooks", False):
+        if not settings.get("hooks") and not manifest.get("had_hooks", True):
             settings.pop("hooks", None)
         line = manifest.get("statusline")
         if line and settings.get("statusLine") == line["installed"]:
@@ -237,10 +291,15 @@ def main():
         removable = []
         kept = []
         keep_runtime = references_runtime(settings)
+        router_files = router_shared_files() if any(name in SHARED_ROLES for name in previous_files) else set()
         for relative, expected in previous_files.items():
             target = safe_path(relative)
             if keep_runtime and relative.startswith(("harness/hooks/", "harness/statusline/")):
                 # Keep the full runtime because scripts import companion modules.
+                continue
+            if relative in SHARED_ROLES and (router_files is None or relative in router_files):
+                reason = "invalid Router manifest" if router_files is None else "Router still uses it"
+                print(f"Keeping shared role file: {relative} ({reason}).")
                 continue
             if target.is_file() and digest(target.read_bytes()) == expected:
                 removable.append(target)
@@ -327,6 +386,8 @@ def main():
             relative = path.relative_to(root)
             if any(part in ("__pycache__", ".git", ".DS_Store") for part in relative.parts) or path.suffix in (".pyc", ".pyo"):
                 continue
+            if folder == "agents" and relative == Path("SHARED.sha256"):
+                continue  # Repository drift check, not an installable agent.
             if path.is_symlink():
                 fail(f"distribution contains a symbolic link: {folder}/{relative}")
             if path.is_file():
@@ -342,7 +403,7 @@ def main():
                 fail(f"destination is not a file: {relative}")
             current = digest(target.read_bytes())
             if current == wanted:
-                if relative in previous_files:
+                if relative in previous_files or relative in SHARED_ROLES:
                     files[relative] = wanted
                 continue
             if previous_files.get(relative) != current:
@@ -372,12 +433,15 @@ def main():
                 settings["statusLine"] = wanted_line
         elif settings["statusLine"] != wanted_line:
             print("Keeping existing statusLine. Use --statusline to replace it.")
+    had_hooks = manifest.get("had_hooks", True) if manifest else (
+        "hooks" in original and (router_manifest() or {}).get("had_hooks") is not False
+    )
     next_manifest = {
         "version": 1,
         "files": files,
         "hooks": next_hooks,
-        "had_hooks": manifest.get("had_hooks", "hooks" in original),
-        "existing_events": manifest.get("existing_events", list(original.get("hooks", {}))),
+        "had_hooks": had_hooks,
+        "existing_empty_events": existing_empty_events,
         "statusline": line,
     }
     if judge_permissions is not None:

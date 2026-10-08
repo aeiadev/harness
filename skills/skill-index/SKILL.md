@@ -39,3 +39,4 @@ Give a delegated role its objective, allowed files, requirements, acceptance
 check, and short return shape. Use separate worktrees for simultaneous edits.
 Keep research and review roles read-only. The judge evaluates fresh evidence
 against the acceptance check rather than the builder's confidence.
+Router uses these same nine role names for automatic routing when installed.

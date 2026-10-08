@@ -1,16 +1,18 @@
 # Working with Harness in Codex
 
-Load the `checkpoint` skill for tasks spanning several steps. Keep STATE.md current
-at checkpoints and use the exact state path named by the context meter.
-After compaction, recover from the injected checkpoint and read the full file
-when the injection says it was truncated.
+Load `checkpoint` for multistep work and after compaction. Keep STATE.md current at checkpoints using the path named by the context meter.
 
-Give each role a scoped TASK, FILES, BAR, and RETURN. Use sweeper to find things,
-researcher for evidence, planner for a plan, builder for an isolated change,
-builder-in-place for this directory, worker for several steps, test-writer for
-failing tests, and docs-writer for documentation. Give judge fresh context and
-the same acceptance check.
+- sweeper: find files and facts.
+- researcher: gather evidence for a decision.
+- planner: critique and plan a change.
+- builder: make an isolated change.
+- builder-in-place: change the current checkout.
+- worker: complete a scoped task with several steps.
+- test-writer: write failing tests.
+- docs-writer: write documentation.
+- judge: check the result in fresh context.
 
-Preserve unrelated work. Read project instructions before edits. Keep secrets
-out of source and state. Verify behavior before claiming completion. The spend
-side file is an estimate when rates are configured and displays $-- otherwise.
+Give judge the same acceptance check; it must return PASS or SEND_BACK after checking the files and running the check.
+With Router installed, its delegation defaults (`install.sh --with-defaults`) cover when and how to delegate; this list is only a reference.
+
+Preserve unrelated work. Read project instructions before edits. Keep secrets out of source, docs, and state. Verify behavior before claiming completion.

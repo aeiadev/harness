@@ -1,18 +1,18 @@
 # Working with Harness
 
-Load the `checkpoint` skill when starting a task that spans several steps, at a
-checkpoint, or after compaction. Keep STATE.md current using its template and
-use the exact state path named by the context meter.
+Load `checkpoint` for multistep work and after compaction. Keep STATE.md current at checkpoints using the path named by the context meter.
 
-Use `skill-index` to choose a procedure or role. Give each role a brief with
-TASK, FILES, BAR, and RETURN. Use sweeper to find things, researcher to support a
-decision, planner to critique and plan, builder for an isolated change, or
-builder-in-place for a change in this directory. Use worker for a scoped task
-with several steps, test-writer for failing tests, and docs-writer for docs.
+- sweeper: find files and facts.
+- researcher: gather evidence for a decision.
+- planner: critique and plan a change.
+- builder: make an isolated change.
+- builder-in-place: change the current checkout.
+- worker: complete a scoped task with several steps.
+- test-writer: write failing tests.
+- docs-writer: write documentation.
+- judge: check the result in fresh context.
 
-Give judge a fresh context and the same acceptance check. It returns PASS or
-SEND_BACK after checking the files and running the check itself.
+Give judge the same acceptance check; it must return PASS or SEND_BACK after checking the files and running the check.
+With Router installed, its delegation defaults (`install.sh --with-defaults`) cover when and how to delegate; this list is only a reference.
 
-Preserve unrelated work. Read project instructions before changing files.
-Keep secrets out of source, documentation, and state. Verify behavior before
-claiming completion, and report any remaining limitation plainly.
+Preserve unrelated work. Read project instructions before edits. Keep secrets out of source, docs, and state. Verify behavior before claiming completion.
