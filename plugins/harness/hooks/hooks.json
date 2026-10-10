@@ -1,0 +1,123 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || bash \"${CLAUDE_PLUGIN_ROOT}/hooks/context/inject-project-context.sh\" --reset",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" restore --host=claude",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" restore --host=claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || bash \"${CLAUDE_PLUGIN_ROOT}/hooks/context/inject-project-context.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || bash \"${CLAUDE_PLUGIN_ROOT}/hooks/guard/danger-cmd-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" check --host=claude",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || bash \"${CLAUDE_PLUGIN_ROOT}/hooks/helpers/auto-format.sh\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || bash \"${CLAUDE_PLUGIN_ROOT}/hooks/helpers/verify-patch-landed-auto.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" archive --host=claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || bash \"${CLAUDE_PLUGIN_ROOT}/hooks/helpers/stop-check-verify-patch.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" snapshot --host=claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

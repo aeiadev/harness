@@ -30,6 +30,60 @@ JUDGE_PERMISSIONS = {
 }
 
 
+CODEX_NOTES = {
+    'judge': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the judge inherits the parent\n'
+        "session's sandbox. This was verified on Codex 0.156.1.\n"
+        '\n'
+        'For Codex, the caller must select the `harness-judge` permission profile from\n'
+        '`codex/judge-permissions.toml` in a dedicated verification session before spawning\n'
+        'the judge with `codex -c default_permissions=harness-judge`. Never combine this\n'
+        'profile with `-s`, which overrides it.\n'
+        'The profile grants temporary writes, keeps workspace roots read-only, and disables\n'
+        'network access. Keep the source repository as the session workspace and set\n'
+        '`TMPDIR` outside it before starting the session. A disposable copy must be outside\n'
+        'every workspace root. If effective permissions do not protect\n'
+        'the source or cannot run the BAR, return SEND_BACK with the blocked requirement.'
+    ),
+    'planner': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the child inherits the parent\n'
+        "session's sandbox. See the README's Codex judge recipe for a restricted parent\n"
+        'session.'
+    ),
+    'researcher': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the child inherits the parent\n'
+        "session's sandbox. See the README's Codex judge recipe for a restricted parent\n"
+        'session.'
+    ),
+    'sweeper': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the child inherits the parent\n'
+        "session's sandbox. See the README's Codex judge recipe for a restricted parent\n"
+        'session.'
+    ),
+    'test-writer': (
+        'On Codex, these instructions request that production code remain read-only; they\n'
+        'do not enforce that restriction. It is enforced only if the parent session starts\n'
+        'with a permission profile that protects those files. A Codex role file cannot\n'
+        "enforce read-only; the child inherits the parent session's sandbox. See the\n"
+        "README's Codex judge recipe for a restricted parent session."
+    ),
+}
+
+
+def codex_note(name):
+    """Codex-only guidance lives here, never in the Markdown bodies."""
+    note = CODEX_NOTES.get(name)
+    return "\n## Codex\n\n" + note + "\n" if note else ""
+
+
 def role_values(path):
     """Read the plain scalar frontmatter used by agents/*.md."""
     text = path.read_text(encoding="utf-8")
@@ -48,7 +102,7 @@ def role_values(path):
     values = {
         "name": metadata["name"],
         "description": metadata["description"],
-        "developer_instructions": match[2].strip() + "\n",
+        "developer_instructions": match[2].strip() + "\n" + codex_note(metadata["name"]),
         "model": model,
         "model_reasoning_effort": effort,
     }

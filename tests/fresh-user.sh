@@ -65,6 +65,9 @@ try:
 
     hook("SessionStart", "inject-project-context.sh", "clear", "--reset")
     hook("SessionStart", "dispatch.py", "compact")
+    # The resume hook warns only when Claude reports an expired prompt cache.
+    resume = hook("SessionStart", "dispatch.py", "resume")
+    require("restore --host=claude" in resume, "resume hook must use Claude restore adapter")
     inject = hook("UserPromptSubmit", "inject-project-context.sh")
     guard = hook("PreToolUse", "danger-cmd-guard.sh", "Bash")
     hook("PostToolUse", "dispatch.py")
@@ -130,13 +133,26 @@ try:
 
     # Check text files only: Python cache files can contain the runtime location.
     forbidden = b"/" + b"home/"
+    manifest_path = config / "harness/install-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    require(manifest["source"] == str(repo), "manifest source must identify the local checkout")
     for path in config.rglob("*"):
-        if not path.is_file() or path.suffix == ".pyc":
+        if not path.is_file() or path.suffix == ".pyc" or path == manifest_path:
             continue
         data = path.read_bytes()
         require(forbidden not in data, f"absolute home-directory path in {path.relative_to(config)}")
 
-    print("PASS: fresh-user installation, all hook entries, guard, context cap, cost, and portable paths")
+    run(["bash", str(repo / "install.sh"), "--host", "claude", "--uninstall"], cwd=repo)
+    require(settings_path.read_bytes() == b"{}\n", "uninstall did not restore the exact original settings bytes")
+    for relative in ("agents", "skills", "harness"):
+        require(not (config / relative).exists(), f"uninstall left the {relative} directory it created")
+    require(config.is_dir(), "uninstall removed the pre-existing config directory")
+    require(list(config.glob("settings.json.harness-backup-*")), "uninstall without --purge removed backups")
+    purged = run(["bash", str(repo / "install.sh"), "--host", "claude", "--purge"], cwd=repo).stdout
+    require(b"Removed backup:" in purged and not list(config.glob("*.harness-backup-*")),
+            "--purge did not remove Harness backups")
+    require(settings_path.read_bytes() == b"{}\n", "--purge changed settings")
+    print("PASS: fresh-user installation, all hook entries, guard, context cap, cost, portable paths, exact uninstall, and purge")
 except (AssertionError, OSError, ValueError, subprocess.TimeoutExpired) as error:
     print(f"FAIL: fresh-user: {error}", file=sys.stderr)
     sys.exit(1)

@@ -103,3 +103,41 @@ def codex_spend(data):
         found = True
     result = storage.quantity(total) if found else None
     return result, result is not None
+
+
+def codex_tokens(data):
+    """Return complete input plus output usage without guessing from partial history."""
+    if data.get("type") == "turn.completed":
+        counts = usage_counts(data.get("usage"))
+        return counts[0] + counts[2] if counts else None
+    entries, complete = storage.log_records(data.get("transcript_path"))
+    if not complete:
+        return None
+    rollout = any(entry.get("type") == "event_msg"
+                  and storage.object_value(entry.get("payload")).get("type") == "token_count"
+                  for entry in entries)
+    total = 0
+    found = False
+    for entry in entries:
+        payload = storage.object_value(entry.get("payload"))
+        if rollout:
+            if entry.get("type") != "event_msg" or payload.get("type") != "token_count":
+                continue
+            usage = storage.object_value(payload.get("info")).get("total_token_usage")
+        elif entry.get("type") == "turn.completed":
+            usage = entry.get("usage")
+        else:
+            continue
+        counts = usage_counts(usage)
+        if counts is None:
+            return None
+        amount = counts[0] + counts[2]
+        if rollout and found and amount < total:
+            return None
+        total = amount if rollout else total + amount
+        found = True
+    return total if found else None
+
+
+def token_segment(count):
+    return f"{count / 1000:.1f}k tok" if count is not None else ""

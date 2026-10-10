@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Stop/PostToolUse: persist spend and emit an occasional Codex systemMessage."""
 
+import sys
+sys.dont_write_bytecode = True
+
 import json
 import os
 from pathlib import Path
@@ -18,9 +21,14 @@ def main():
     if not key or data.get("agent_id"):
         return
     amount, estimated = spend.codex_spend(data)
-    text = spend.segment(amount)
+    tokens = spend.codex_tokens(data) if amount is None else None
+    text = spend.segment(amount) if amount is not None else spend.token_segment(tokens)
     directory = storage.locked_directory(storage.local_cache() / "spend")
-    storage.replace_private(directory / (key + ".txt"), (text + "\n").encode("utf-8"))
+    side_file = directory / (key + ".txt")
+    if text:
+        storage.replace_private(side_file, (text + "\n").encode("utf-8"))
+    else:
+        side_file.unlink(missing_ok=True)
     marker = directory / (key + ".json")
     raw, _ = storage.guarded_read(marker, 65536)
     try:
@@ -32,10 +40,12 @@ def main():
     interval = max(1, storage.quantity(os.environ.get("HARNESS_SPEND_MESSAGE_SECONDS"), 300))
     last = storage.quantity(marks.get("message_at"), 0)
     if now - last >= interval:
-        qualifier = " (configured-rate estimate)" if estimated else ""
-        if amount is None:
-            qualifier = " (cost unavailable; supply cost or configure HARNESS_CODEX_RATES)"
-        print(json.dumps({"systemMessage": "[harness] spend " + text + qualifier}))
+        if amount is None and tokens is None:
+            message = "[harness] spend unavailable: supply cost or configure HARNESS_CODEX_RATES"
+        else:
+            qualifier = " (configured-rate estimate)" if estimated else ""
+            message = "[harness] spend " + text + qualifier
+        print(json.dumps({"systemMessage": message}))
         marks["message_at"] = now
     marks.update(segment=text, estimated=estimated)
     storage.replace_private(marker, json.dumps(marks).encode("utf-8"))

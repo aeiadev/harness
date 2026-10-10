@@ -1,0 +1,17 @@
+{
+  "name": "harness",
+  "owner": {
+    "name": "AEIA",
+    "url": "https://aeia.dev"
+  },
+  "plugins": [
+    {
+      "name": "harness",
+      "source": "./plugins/harness"
+    },
+    {
+      "name": "shared-roles",
+      "source": "./plugins/shared-roles"
+    }
+  ]
+}

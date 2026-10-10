@@ -1,0 +1,84 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+env:
+  ROUTER_REPOSITORY: aeiadev/router
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ROUTER_REPOSITORY }}
+          path: router
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Prepare old release trees
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/old-trees"
+          ROUTER_V01="$RUNNER_TEMP/old-trees/router-0.1"
+          ROUTER_V02="$RUNNER_TEMP/old-trees/router-0.2"
+          HARNESS_V01="$RUNNER_TEMP/old-trees/harness-0.1"
+          HARNESS_V02="$RUNNER_TEMP/old-trees/harness-0.2"
+          mkdir -p "$ROUTER_V01" "$ROUTER_V02" "$HARNESS_V01" "$HARNESS_V02"
+          git -C router archive --format=tar 36acbaf | tar -x -C "$ROUTER_V01"
+          git -C router archive --format=tar 4214545 | tar -x -C "$ROUTER_V02"
+          git archive --format=tar 063388b | tar -x -C "$HARNESS_V01"
+          git archive --format=tar 3b80d6f | tar -x -C "$HARNESS_V02"
+          echo "ROUTER_V01=$ROUTER_V01" >> "$GITHUB_ENV"
+          echo "ROUTER_V02=$ROUTER_V02" >> "$GITHUB_ENV"
+          echo "HARNESS_V01=$HARNESS_V01" >> "$GITHUB_ENV"
+          echo "HARNESS_V02=$HARNESS_V02" >> "$GITHUB_ENV"
+      - name: Python tests
+        env:
+          ROUTER_DIR: router
+        run: for t in tests/test_*.py; do python3 "$t" || exit 1; done
+      - name: Shell tests
+        run: for t in tests/test_*.sh; do bash "$t" || exit 1; done
+      - name: Fresh user tests
+        run: |
+          bash tests/fresh-user.sh
+          bash tests/fresh-user-codex.sh
+      - name: Generated agents
+        run: python3 codex/generate_agents.py --check
+      - name: Shared hashes
+        run: cd agents && shasum -a 256 -c SHARED.sha256
+      - name: Plugin drift
+        run: python3 scripts/gen_plugin.py --check
+      - name: Plugin shared-roles
+        run: diff -r plugins/shared-roles router/plugins/shared-roles
+      - name: Plugin validate
+        run: if command -v claude >/dev/null; then claude plugin validate .; claude plugin validate plugins/harness; claude plugin validate plugins/shared-roles; fi
+
+  together:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ROUTER_REPOSITORY }}
+          path: router
+      - name: Together with Router
+        env:
+          HARNESS_DIR: ${{ github.workspace }}
+        run: bash router/tests/together.sh
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gitleaks
+        run: docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.18.4 detect --source . --no-banner

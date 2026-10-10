@@ -1,8 +1,8 @@
 # Harness
 
-For developers running long Claude Code or Codex CLI sessions who want safer shell commands, context that survives compaction, and cost visibility. Harness provides hooks, skills, and nine role agents for both hosts.
-Harness loads project context, checks shell commands, keeps a written checkpoint
-through compaction, and shows session cost. It is maintained by AEIA.
+Harness helps long sessions keep their plan and next move across compaction. Reminders follow the real context window, destructive shell commands are stopped, and nine roles work from a checked brief on Claude Code and Codex CLI.
+
+Pair it with [Router](https://github.com/aeiadev/router) for automatic role routing and context pressure nudges.
 
 ## The parts
 
@@ -60,6 +60,13 @@ Review and trust the new hooks in Codex with `/hooks` before they can run.
 Changing a hook script requires trusting it again. The installer does not
 change trust settings or run either CLI.
 
+Claude Code also offers a plugin route. Run `/plugin marketplace add aeiadev/harness`,
+then `/plugin install harness@harness` and `/plugin install shared-roles@harness`.
+The user settings form is `{"enabledPlugins": {"harness@harness": true}}`.
+A script install wins over the plugin: plugin hooks stand down while its install
+manifest exists. A plugin cannot set the main statusline. With a script install, `bash install.sh --statusline` sets it.
+With a plugin install, add this command as the `statusLine.command` in Claude settings by hand: `python3 "$HOME/.claude/harness/statusline/statusline.py"`.
+
 The live statusline is Claude-only. An existing `statusLine` is kept unless you
 explicitly select Harness:
 
@@ -97,6 +104,60 @@ listed in Router's install manifest. If that manifest cannot be read or is inval
 Harness keeps the roles and reports why. Uninstall the remaining package to remove
 its unchanged role files.
 
+Backups sit beside the settings they protect in the selected Claude or Codex home.
+Harness creates them with 0600 mode and they are kept after uninstall until
+`--purge`. Alone, `--purge` lists and removes only Harness's own backups; with
+`--uninstall`, it uninstalls first and then purges. `--dry-run` lists changes
+without writing. Preview the purge or read the installed state:
+
+```bash
+bash install.sh --status
+bash install.sh --dry-run --purge
+```
+
+`--status` is read-only and reports checkout and installed versions, hooks
+registered, installed and changed files, token budget, and last hook write.
+It still reports what it can with damaged settings. Upgrades list and remove
+unchanged files no longer shipped, while edited files remain. Router-claimed roles are never rewritten.
+After both tools reach 0.3.0, shared roles move to the new bytes; the first
+tool's next run quietly updates its own record. Uninstall restores the original
+settings bytes and mode without group or other write when the recorded original
+is available.
+
+<!-- shared:begin -->
+### Install both
+
+[Router](https://github.com/aeiadev/router) routes bounded work to model tiers, checks Claude briefs before a run, and tracks lanes and verdicts. [Harness](https://github.com/aeiadev/harness) guards commands and restores project context. Together, they share roles and add a context pressure signal; each prints its own restore content, so they never write the same line twice.
+
+Clone and install each checkout in either order:
+
+<!-- docs:skip -->
+```bash
+git clone https://github.com/aeiadev/router.git
+cd router && bash install.sh --host both
+```
+
+<!-- docs:skip -->
+```bash
+git clone https://github.com/aeiadev/harness.git
+cd harness && bash install.sh --host both
+```
+
+For Codex, start a new session and review and trust the hooks. Changed scripts can prompt another trust review.
+
+### Upgrade
+
+Run `install.sh` from the new checkout of each tool. An unchanged old file that is no longer shipped is removed and listed; an edited one is kept and listed. `--dry-run` previews changes. Shared roles that the sibling already installed are claimed by this tool, never rewritten. If the sibling is older, the installer prints one notice; upgrade both to get the new shared roles. A 0.2 installer run after a 0.3 sibling still refuses and leaves files unchanged, so upgrade both.
+
+Uninstall restores the original settings bytes and removes only files the tool created. Backups stay until `--purge`: alone, it lists and removes that tool's own backups; Router also removes its retired attempts.sqlite3. With `--uninstall`, it uninstalls then purges; with `--dry-run`, it lists only. Harness `install.sh --status` and `router doctor` show installed versions and skew; Router `install.sh --status` reports Claude Code plugin state.
+
+From 0.1 or 0.2: those releases did not record which backup held your settings. Uninstall restores the oldest Router or Harness backup only when it holds exactly the settings left once both tools are removed; otherwise it writes that content in standard JSON layout, or removes the file when no backup is left and nothing else remains. If Harness 0.1 or 0.2 went first, the file stays 0600.
+
+### Claude Code plugin route
+
+In Claude Code, `/plugin marketplace add aeiadev/router`, then `/plugin install router@router` and `/plugin install shared-roles@router`. The settings form is `{"enabledPlugins": {"router@router": true}}`. Plugin agents use names such as `router:builder-std`. A script install wins over the plugin: plugin hooks stand down when the install manifest exists. Codex has no plugin; it is not shipped there.
+<!-- shared:end -->
+
 ## Quick start
 
 1. Add the short instructions in `examples/CLAUDE.md.example` to your global
@@ -112,7 +173,7 @@ its unchanged role files.
 ```text
 TASK: Add validation for an empty title.
 FILES: src/title.py and tests/test_title.py in this repository.
-BAR: python3 tests/test_title.py
+BAR: timeout 60 python3 tests/test_title.py
 RETURN: CHANGED / BAR / OUTPUT / NOT DONE / OPEN
 ```
 
@@ -140,7 +201,45 @@ names, instructions, and model tiers remain in sync.
 The nine Markdown role files are pinned in `agents/SHARED.sha256`. Router uses
 the same role names and byte-identical Markdown files when both are installed.
 
-To use a role in Claude Code, ask the coordinator to use the role and provide its brief. For example: “Use the `sweeper` role to find every checkpoint configuration file, make no edits, and return the paths.” In Codex, request the named role in the session instructions, for example: “Use the `builder-in-place` role. TASK: Reject an empty title. FILES: src/title.py tests/test_title.py. BAR: timeout 60 python3 tests/test_title.py. RETURN: changed files and BAR output.” Codex receives the role instructions from the installed TOML file. Its requested read-only behavior is not enforced by that file; use the parent session permission profile when enforcement matters.
+To use a role in Claude Code, ask the coordinator to use the role and provide its brief. The `sweeper`, `researcher`, and `planner` require TASK and RETURN; FILES and BAR are optional and must stay in TASK, FILES, BAR, RETURN order. The other roles require all four fields. For example:
+
+#### Sweeper
+```text
+TASK: Find every checkpoint configuration file without edits.
+FILES: This repository.
+BAR: timeout 60 rg --files -g checkpoint.json
+RETURN: Paths found, or none.
+```
+
+#### Researcher
+```text
+TASK: Gather evidence for choosing a checkpoint path.
+RETURN: File locations and a short recommendation.
+```
+
+#### Planner
+```text
+TASK: Critique the title validation plan without edits.
+RETURN: A bounded implementation plan.
+```
+
+#### Builder
+```text
+TASK: Reject an empty title.
+FILES: src/title.py and tests/test_title.py.
+BAR: timeout 60 python3 tests/test_title.py
+RETURN: CHANGED / BAR / OUTPUT / NOT DONE / OPEN
+```
+
+#### Judge
+```text
+TASK: Verify the title validation change.
+FILES: src/title.py and tests/test_title.py.
+BAR: timeout 60 python3 tests/test_title.py
+RETURN: VERDICT / BAR / FINDINGS / REQUIREMENTS
+```
+
+In Codex, request the named role in the session instructions and give it the same brief. Codex receives role instructions from the installed TOML file. Its requested read-only behavior is not enforced by that file; use the parent session permission profile when enforcement matters.
 Claude Code tool allowlists still apply to the Markdown roles. On Codex,
 read-only behavior for `planner`, `researcher`, `sweeper`, and `judge` is requested
 by the role's instructions, not enforced. It is enforced only if the parent
@@ -248,21 +347,45 @@ Override them at the Git root in `.claude/checkpoint.json` or
 ```json
 {
   "checkpoint_path": "STATE.md",
-  "remind_at": 180000,
-  "urgent_at": 240000,
   "window_tokens": 280000,
   "repeat_after": 12000,
-  "restore_bytes": 4000
+  "restore_bytes": 4000,
+  "restore_order": ["Next move", "Objective", "In flight"]
 }
 ```
 
-The three token thresholds must increase in that order. `repeat_after` sets the
+Reminders default to 65% and 85% of the live context window. The window comes
+from the Claude statusline, then the rollout window on Codex, then, on Claude
+only, the last statusline window seen if it is under 10 minutes old;
+`window_tokens` is only the fallback when none is known.
+To fix a threshold instead, set `remind_at` or `urgent_at` as a token count:
+
+```json
+{ "remind_at": 180000, "urgent_at": 240000 }
+```
+
+Setting either one turns off the live-window default for that threshold. If
+`remind_at` alone is at or above 85% of the window and below the window, the urgent
+threshold becomes the window. Explicit values must satisfy 0 < `remind_at` <
+`urgent_at` < the window, and values that do not fall back to 65% and 85%; only the
+urgent value that `remind_at` alone produces may equal the window. `restore_order`
+lists the checkpoint section headings to restore first, in order, ignoring case;
+any text before the first `##` heading is restored first, and other sections follow
+in file order. The default is `["Next move", "Objective", "In flight"]`, and a
+value that is not a list, an empty list, or a list with a blank or non-text item
+falls back to it. `repeat_after` sets the
 additional token usage before another urgent reminder if the checkpoint has not
 changed. `checkpoint_path` must be a relative path inside the project, without
 symbolic links. `restore_bytes` is clamped to 1,000 through 4,000 bytes, including
 the recovery notice and file pointer. A session retains its checkpoint location
 when tools change directory. Sessions started in the home directory without a
 project use a private draft location reported by the meter.
+
+The pressure file for Router is `$XDG_STATE_HOME/claude-harness/pressure/<session-hash>.json`,
+or `$HOME/.local/state` when XDG_STATE_HOME is unset or relative. Harness hashes
+the session ID, writes the current window, percent, level, and host, and replaces
+the file privately with 0600 mode. Router reads this signal for context pressure
+nudges.
 
 Before compaction, both hosts copy the current file. After compaction, available
 plaintext summaries are stored with checkpoint copies and small receipts under
@@ -271,13 +394,28 @@ Hooks request a save but cannot guarantee the agent updates the project file.
 
 Claude session cost comes from `cost.total_cost_usd` in its statusline JSON.
 Codex has no command statusline, and its built-in cost items are Enterprise-only.
-Its `Stop` and `PostToolUse` spend hook writes the same `$0.00` or `$--` segment
+Its `Stop` and `PostToolUse` spend hook writes a cost or token segment
 to `$XDG_STATE_HOME/claude-harness/spend/<session-hash>.txt` (with the usual
 `$HOME/.local/state` fallback). The hook also emits a throttled `systemMessage`.
 Reported cost is used when available. Otherwise, complete rollout token usage
-and `HARNESS_CODEX_RATES` produce an estimate. Without usable usage and rates,
-the segment is `$--`. No rates are bundled, and estimates are not billing data.
+and `HARNESS_CODEX_RATES` produce an estimate. Without configured rates, complete
+usage produces a token count. When Codex usage is incomplete, the hook writes no
+spend file and the segment shows nothing instead of `$--`. No rates are bundled, and estimates are
+not billing data.
 The display does not query a billing service or enforce a spending limit.
+
+### Host limits
+
+| Feature | Claude Code | Codex |
+| --- | --- | --- |
+| Restore after compaction | Full checkpoint restore. | Full checkpoint restore. |
+| Window-relative reminders | Live context window. | Partial: rollout window if present, else policy. |
+| Resume-cache warning | Available from Claude resume data. | Claude only; no resume-cache warning. |
+| Cache-hit percent | Shown in the Claude statusline. | Claude only; no Codex command statusline. |
+| Codex token fallback | Not needed for Claude cost display. | Token count via the spend hook when rates are unavailable. |
+| Shell guard | Covers shell tools. | Covers shell tools. |
+| Background exemption | `run_in_background` skips only the timeout rule; `&` still needs `timeout N`. | Claude only; `npm run dev &` stays blocked on Codex. |
+| Brief rule | Checked brief text lives in the role files on both hosts. | Checked brief text lives in the role files on both hosts. |
 
 ## Adapt it
 

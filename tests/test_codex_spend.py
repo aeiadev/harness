@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,9 @@ class SpendTests(unittest.TestCase):
     def side_text(self):
         return (self.directory / (self.key + ".txt")).read_text().strip()
 
+    def side_file(self):
+        return self.directory / (self.key + ".txt")
+
     def rates(self, **extra):
         rates = {"gpt-6-sol": {"input": 2, "cached_input": 1, "output": 4}}
         rates.update(extra)
@@ -59,8 +63,36 @@ class SpendTests(unittest.TestCase):
     def test_missing_prices_never_invent_spend(self):
         self.rollout([(1000000, 0, 1000000)])
         message = self.run_hook()
-        self.assertEqual(self.side_text(), "$--")
-        self.assertIn("cost unavailable", message["systemMessage"])
+        self.assertEqual(self.side_text(), "2000.0k tok")
+        self.assertIn("2000.0k tok", message["systemMessage"])
+
+    def test_unpriced_turn_shows_tokens_and_incomplete_usage_does_not(self):
+        self.run_hook({**self.payload, "type": "turn.completed", "usage": {
+            "input_tokens": 12000, "cached_input_tokens": 0, "output_tokens": 300}},
+            env=self.rates())
+        self.assertEqual(self.side_text(), "$0.03")
+        self.run_hook({**self.payload, "type": "turn.completed", "model": "unknown-model",
+                       "usage": {"input_tokens": 12000, "cached_input_tokens": 0,
+                                 "output_tokens": 300}}, env=self.rates())
+        self.assertEqual(self.side_text(), "12.3k tok")
+        self.run_hook({**self.payload, "type": "turn.completed", "model": "unknown-model",
+                       "usage": {"input_tokens": 12000}}, env=self.rates())
+        self.assertFalse(self.side_file().exists())
+
+    def test_incomplete_usage_removes_stale_spend_and_reports_exact_message(self):
+        self.run_hook({**self.payload, "cost": {"total_cost_usd": 1.5}})
+        self.assertEqual(self.side_text(), "$1.50")
+        marker = self.directory / (self.key + ".json")
+        marks = json.loads(marker.read_text())
+        marks["message_at"] = 0
+        marker.write_text(json.dumps(marks))
+        message = self.run_hook({**self.payload, "type": "turn.completed",
+                                 "usage": {"input_tokens": 100}})
+        self.assertFalse(self.side_file().exists())
+        self.assertIsNotNone(re.fullmatch(
+            r"\[harness\] spend unavailable: supply cost or configure HARNESS_CODEX_RATES",
+            message["systemMessage"]))
+        self.assertEqual(json.loads(marker.read_text())["segment"], "")
 
     def test_reported_cost_matches_statusline_segment(self):
         data = {**self.payload, "cost": {"total_cost_usd": 1.234}}
@@ -126,41 +158,41 @@ class SpendTests(unittest.TestCase):
             with self.subTest(rates=rates):
                 self.rollout([(1000000, 0, 0)])
                 self.run_hook(env=dict(self.env, HARNESS_CODEX_RATES=rates))
-                self.assertEqual(self.side_text(), "$--")
+                self.assertEqual(self.side_text(), "1000.0k tok")
         self.rollout([(1000000, 0, 0)], model="unknown-model")
         self.run_hook(env=self.rates())
-        self.assertEqual(self.side_text(), "$--")
+        self.assertEqual(self.side_text(), "1000.0k tok")
         self.rollout([(1, 2, 0)])
         self.run_hook(env=self.rates())
-        self.assertEqual(self.side_text(), "$--")
+        self.assertFalse(self.side_file().exists())
 
     def test_large_partial_transcript_does_not_understate_cost(self):
         self.rollout([(1000000, 0, 0)])
         content = self.transcript.read_text()
         self.transcript.write_text("x" * 4194305 + "\n" + content)
         self.run_hook(env=self.rates())
-        self.assertEqual(self.side_text(), "$--")
+        self.assertFalse(self.side_file().exists())
 
-    def test_malformed_history_and_missing_model_do_not_invent_estimates(self):
+    def test_malformed_history_is_unavailable_but_model_free_usage_shows_tokens(self):
         self.rollout([(1000000, 0, 0)])
         with self.transcript.open("a") as stream:
             stream.write("{malformed\n")
         self.run_hook(env=self.rates())
-        self.assertEqual(self.side_text(), "$--")
+        self.assertFalse(self.side_file().exists())
         self.rollout([(1000000, 0, 0)])
         lines = self.transcript.read_text().splitlines()
         self.transcript.write_text("\n".join(lines[1:]) + "\n")
         self.run_hook(env=self.rates())
-        self.assertEqual(self.side_text(), "$--")
+        self.assertEqual(self.side_text(), "1000.0k tok")
 
     def test_fifo_and_symlink_transcripts_do_not_hang(self):
         os.mkfifo(self.transcript)
         self.run_hook(env=self.rates())
-        self.assertEqual(self.side_text(), "$--")
+        self.assertFalse(self.side_file().exists())
         self.transcript.unlink()
         self.transcript.symlink_to(self.base / "absent")
         self.run_hook(env=self.rates())
-        self.assertEqual(self.side_text(), "$--")
+        self.assertFalse(self.side_file().exists())
 
     def test_missing_session_or_child_never_overwrites_parent_spend(self):
         self.assertIsNone(self.run_hook({"model": "gpt-6-sol"}))

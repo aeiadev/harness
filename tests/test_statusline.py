@@ -2,6 +2,7 @@
 """Standalone status-line checks with no network, transcript, or account required."""
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -49,6 +50,20 @@ class StatuslineTests(unittest.TestCase):
                 "cache_creation_input_tokens": 20000, "output_tokens": 10000}}})
         self.assertIn("ctx 40%", result)
         self.assertIn("$0.00", result)
+
+    def test_cache_hit_percent_uses_input_only(self):
+        result = self.render({"context_window": {"current_usage": {
+            "input_tokens": 10000, "cache_creation_input_tokens": 20000,
+            "cache_read_input_tokens": 50000, "output_tokens": 80000}}})
+        self.assertIn("cache 62%", result)
+
+    def test_cache_hit_absent_for_zero_missing_or_non_numeric_usage(self):
+        for usage in ({}, {"input_tokens": 0, "cache_read_input_tokens": 0},
+                      {"input_tokens": "bad", "cache_read_input_tokens": 10},
+                      {"input_tokens": 10, "cache_read_input_tokens": []}):
+            with self.subTest(usage=usage):
+                self.assertNotIn("cache ", self.render({"context_window": {
+                    "current_usage": usage}}))
 
     def test_spend_warning_only_above_explicit_threshold(self):
         payload = {"cost": {"total_cost_usd": 1.25}}
@@ -99,6 +114,26 @@ class StatuslineTests(unittest.TestCase):
         result = self.render({"context_window": {"used_percentage": 0},
                               "transcript_path": "/nonexistent", "cost": {"total_cost_usd": 0}})
         self.assertIn("ctx 0%", result)
+
+    def test_statusline_window_is_remembered_by_checkpoint_hook(self):
+        data = {"session_id": "live-window", "cwd": str(self.base),
+                "context_window": {"context_window_size": 200000,
+                                   "current_usage": {"input_tokens": 100000}}}
+        self.render(data)
+        path = self.base / "xdg/claude-harness/pressure" / (
+            hashlib.sha256(b"live-window").hexdigest()[:16] + ".json")
+        self.assertEqual(json.loads(path.read_text())["window_source"], "statusline")
+        transcript = self.base / "usage.jsonl"
+        transcript.write_text(json.dumps({"type": "assistant", "message": {
+            "usage": {"input_tokens": 130000}}}) + "\n")
+        result = subprocess.run([sys.executable, str(REPO / "hooks/checkpoint/dispatch.py"),
+                                 "check"], input=json.dumps({"session_id": "live-window",
+                                 "cwd": str(self.base), "transcript_path": str(transcript)}),
+                                text=True, capture_output=True, env=self.env,
+                                cwd=self.base, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Refresh", result.stdout)
+        self.assertEqual(json.loads(path.read_text())["window_source"], "statusline")
 
 
 if __name__ == "__main__":

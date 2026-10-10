@@ -1,0 +1,12 @@
+{
+  "name": "harness",
+  "version": "0.3.0",
+  "description": "Checkpoint and context hooks, guard and verification helpers, and five workflow skills for Claude Code.",
+  "author": {
+    "name": "AEIA",
+    "url": "https://aeia.dev"
+  },
+  "homepage": "https://github.com/aeiadev/harness",
+  "repository": "https://github.com/aeiadev/harness",
+  "license": "MIT"
+}

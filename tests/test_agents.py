@@ -132,7 +132,7 @@ class AgentTests(unittest.TestCase):
                         self.assertIn(label, body)
                 if name == "judge":
                     self.assertRegex(body, r"(?i)numbered findings")
-                    self.assertIn("Return one verdict line", body)
+                    self.assertIn("Start the first line with exactly one of PASS, SEND_BACK, or NOT DONE", body)
                 self.assertNotIn(chr(0x2014), body, "agent text must not contain em dashes")
         self.assertEqual(len(names), len(set(names)), "agent names must be unique")
 
@@ -146,7 +146,15 @@ class AgentTests(unittest.TestCase):
                 metadata, body = parse_agent(ROOT / "agents" / (path.stem + ".md"))
                 self.assertEqual(fields["name"], metadata["name"])
                 self.assertEqual(fields["description"], metadata["description"])
-                self.assertEqual(fields["developer_instructions"], body.strip() + "\n")
+                base = body.strip() + "\n"
+                instructions = fields["developer_instructions"]
+                self.assertTrue(instructions.startswith(base), "TOML must start with the Markdown body")
+                tail = instructions[len(base):]
+                if path.stem in {"judge", "sweeper", "researcher", "planner", "test-writer"}:
+                    self.assertTrue(tail.startswith("\n## Codex\n\n"), f"{path.name}: Codex note missing")
+                    self.assertIn("Codex", tail)
+                else:
+                    self.assertEqual(tail, "", f"{path.name}: unexpected text after the Markdown body")
                 self.assertEqual((fields["model"], fields["model_reasoning_effort"]), tiers[metadata["model"]])
                 self.assertNotIn("tools", fields, "Codex has no Claude-style tool allowlist")
 
@@ -207,7 +215,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn("fresh context", body.lower())
         self.assertRegex(body, r"(?i)rerun the supplied check yourself")
         self.assertIn("BAR", body)
-        self.assertIn("exactly one of PASS or SEND_BACK", body)
+        self.assertIn("exactly one of PASS, SEND_BACK, or NOT DONE", body)
         self.assertIn("without editing the project", body)
 
     def test_builder_isolation_contract(self):
@@ -250,6 +258,7 @@ class InstallTests(unittest.TestCase):
         self.source = self.root / "distribution"
         self.source.mkdir()
         shutil.copy2(ROOT / "install.sh", self.source / "install.sh")
+        shutil.copy2(ROOT / "VERSION", self.source / "VERSION")
         (self.source / "examples").mkdir()
         shutil.copy2(ROOT / "examples" / "settings.example.json", self.source / "examples" / "settings.example.json")
         # Fixtures test packaging independently from runtime hook behavior.
@@ -380,7 +389,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(shlex.split(command), ["python3", str(self.claude_home / "harness/statusline/statusline.py")])
         self.assertFalse((self.user_home / ".claude").exists())
         self.run_install("--uninstall", env=env)
-        self.assertEqual(self.settings(), {})
+        self.assertFalse((self.claude_home / "settings.json").exists(), "uninstall left the settings file it created")
 
     def test_statusline_replacement_restores_latest_user_value(self):
         first = {"type": "command", "command": "echo first"}
@@ -816,8 +825,9 @@ class CodexInstallTests(unittest.TestCase):
         self.run_install(host="both", env=env)
         self.assertTrue((self.claude_home / "settings.json").is_file())
         self.run_install("--uninstall", host="both", env=env)
-        self.assertEqual(self.settings(), {})
-        self.assertEqual(json.loads((self.claude_home / "settings.json").read_text()), {})
+        self.assertFalse((self.codex_home / "hooks.json").exists(), "uninstall left the hooks.json it created")
+        self.assertFalse((self.claude_home / "settings.json").exists(), "uninstall left the settings.json it created")
+        self.assertTrue(self.codex_home.is_dir(), "uninstall removed a host home that existed before")
 
     def test_custom_codex_home_is_shell_quoted_and_restored(self):
         self.codex_home = self.root / "custom home ' dollar $ value"
@@ -831,7 +841,7 @@ class CodexInstallTests(unittest.TestCase):
                     self.assertTrue(Path(words[1]).is_file())
         self.assertFalse((self.user_home / ".codex").exists())
         self.run_install("--uninstall", env=env)
-        self.assertEqual(self.settings(), {})
+        self.assertFalse((self.codex_home / "hooks.json").exists(), "uninstall left the hooks.json it created")
 
     def test_modified_codex_role_is_preserved(self):
         self.run_install()

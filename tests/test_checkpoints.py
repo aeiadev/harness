@@ -46,18 +46,23 @@ class CheckpointContract(unittest.TestCase):
     def invoke(self, event_name, host="claude", fields=None, raw=None, environment=None):
         path = ROOT / ("codex/hooks.json" if host == "codex" else "examples/settings.example.json")
         wiring = json.loads(path.read_text())["hooks"][event_name]
+        payload = {**self.event, **({"model": "gpt-example"} if host == "codex" else {}), **(fields or {})}
         commands = [item["command"] for group in wiring for item in group["hooks"]
-                    if "/checkpoint/" in item["command"]]
+                    if "/checkpoint/" in item["command"] and
+                    (event_name != "SessionStart" or group.get("matcher") == payload.get("source"))]
+        if event_name == "SessionStart" and not commands:
+            commands = [item["command"] for group in wiring if group.get("matcher") == "compact"
+                        for item in group["hooks"] if "/checkpoint/" in item["command"]]
         self.assertEqual(len(commands), 1, "Host needs one checkpoint handler for this event")
         words = shlex.split(commands[0])
         words[0] = sys.executable
         words[1] = str(ROOT / words[1].split("/harness/", 1)[1])
-        payload = {**self.event, **({"model": "gpt-example"} if host == "codex" else {}), **(fields or {})}
         outcome = subprocess.run(words, input=raw if raw is not None else json.dumps(payload),
                                  text=True, capture_output=True, cwd=self.project,
                                  env=environment or self.environment, timeout=5)
         self.assertEqual(outcome.returncode, 0, outcome.stderr)
         self.assertEqual(outcome.stderr, "")
+        self.stdout = outcome.stdout
         if not outcome.stdout:
             return ""
         envelope = json.loads(outcome.stdout)["hookSpecificOutput"]
@@ -78,6 +83,136 @@ class CheckpointContract(unittest.TestCase):
     def artifacts(self, filename):
         return list((self.base / "local").rglob(filename))
 
+    def relative_policy(self, host="claude", **overrides):
+        path = self.project / ("." + host) / "checkpoint.json"
+        path.write_text(json.dumps({"window_tokens": 280000, **overrides}))
+
+    def test_relative_thresholds_use_claude_window(self):
+        self.relative_policy()
+        for window, below, remind, urgent in ((1000000, 180000, 650000, 850000),
+                                                (200000, 129999, 130000, 170000)):
+            with self.subTest(window=window):
+                fields = {"context_window": {"context_window_size": window}}
+                self.usage(below)
+                self.assertEqual(self.invoke("PostToolUse", fields=fields), "")
+                self.usage(remind)
+                self.assertIn("Refresh", self.invoke("PostToolUse", fields=fields))
+                self.usage(urgent)
+                self.assertIn("before starting", self.invoke("PostToolUse", fields=fields))
+                self.invoke("SessionStart", fields={"source": "compact"})
+
+    def test_lone_high_reminder_reaches_urgent_at_window(self):
+        self.relative_policy(remind_at=900)
+        fields = {"context_window": {"context_window_size": 1000}}
+        self.usage(899)
+        self.assertEqual(self.invoke("PostToolUse", fields=fields), "")
+        self.usage(900)
+        self.assertIn("Refresh", self.invoke("PostToolUse", fields=fields))
+        self.usage(1000)
+        self.assertIn("before starting", self.invoke("PostToolUse", fields=fields))
+
+    def test_relative_fallback_explicit_and_codex_rollout(self):
+        self.relative_policy()
+        self.usage(181999)
+        self.assertEqual(self.invoke("PostToolUse"), "")
+        self.usage(182000)
+        self.assertIn("Refresh", self.invoke("PostToolUse"))
+        self.relative_policy(remind_at=100000)
+        for window in (1000000, 200000):
+            with self.subTest(window=window):
+                fields = {"context_window": {"context_window_size": window}}
+                self.invoke("SessionStart", fields={"source": "compact"})
+                self.usage(99999)
+                self.assertEqual(self.invoke("PostToolUse", fields=fields), "")
+                self.usage(100000)
+                self.assertIn("Refresh", self.invoke("PostToolUse", fields=fields))
+                self.usage(130000)
+                self.assertEqual(self.invoke("PostToolUse", fields=fields), "")
+        self.relative_policy("codex")
+        self.log.write_text(json.dumps({"type": "turn_context", "payload": {
+            "model_context_window": 200000}}) + "\n" + json.dumps({"type": "event_msg",
+            "payload": {"type": "token_count", "info": {"last_token_usage": {
+                "input_tokens": 130000}}}}) + "\n")
+        self.assertIn("Refresh", self.invoke("PostToolUse", "codex"))
+
+    def test_explicit_thresholds_checked_against_real_window(self):
+        cases = (({"remind_at": 500000, "urgent_at": 900000}, 1000000, 500000, 900000),
+                 ({"remind_at": 500000}, 1000000, 500000, 850000),
+                 ({"remind_at": 900000, "urgent_at": 500000}, 1000000, 650000, 850000),
+                 ({"remind_at": 600000, "urgent_at": 600000}, 1000000, 650000, 850000),
+                 ({"remind_at": 500000, "urgent_at": 900000}, 200000, 130000, 170000))
+        for explicit, window, remind, urgent in cases:
+            with self.subTest(explicit=explicit, window=window):
+                self.relative_policy(**explicit)
+                self.invoke("SessionStart", fields={"source": "compact"})
+                fields = {"context_window": {"context_window_size": window}}
+                self.usage(remind - 1)
+                self.assertEqual(self.invoke("PostToolUse", fields=fields), "")
+                self.usage(remind)
+                self.assertIn("Refresh", self.invoke("PostToolUse", fields=fields))
+                self.usage(urgent - 1)
+                self.assertEqual(self.invoke("PostToolUse", fields=fields), "")
+                self.usage(urgent)
+                self.assertIn("before starting", self.invoke("PostToolUse", fields=fields))
+
+    def test_pressure_file_private_and_rewrites_only_on_change(self):
+        self.relative_policy()
+        path = self.base / "local/claude-harness/pressure" / (
+            hashlib.sha256(b"fixture").hexdigest()[:16] + ".json")
+        fields = {"context_window": {"context_window_size": 200000}}
+        self.usage(100000)
+        self.invoke("PostToolUse", fields=fields)
+        record = json.loads(path.read_text())
+        self.assertEqual(set(record), {"schema", "host", "ts", "used", "window",
+                                      "window_source", "percent", "level"})
+        self.assertEqual((record["schema"], record["host"], record["used"],
+                          record["window"], record["window_source"], record["percent"],
+                          record["level"]), (1, "claude", 100000, 200000,
+                                             "statusline", 50.0, "ok"))
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        first = path.stat().st_ino
+        self.usage(101000)
+        self.invoke("PostToolUse", fields=fields)
+        self.assertEqual(path.stat().st_ino, first, "half-point move should not rewrite")
+        self.usage(130000)
+        self.invoke("PostToolUse", fields=fields)
+        self.assertNotEqual(path.stat().st_ino, first, "level change must atomically replace")
+        self.assertEqual(json.loads(path.read_text())["level"], "remind")
+
+    def test_pressure_rollout_missing_session_and_unwritable_state(self):
+        self.relative_policy("codex")
+        self.log.write_text(json.dumps({"type": "turn_context", "payload": {
+            "model_context_window": 200000}}) + "\n" + json.dumps({"type": "event_msg",
+            "payload": {"type": "token_count", "info": {"last_token_usage": {
+                "input_tokens": 170000}}}}) + "\n")
+        self.invoke("PostToolUse", "codex")
+        path = self.base / "local/claude-harness/pressure" / (
+            hashlib.sha256(b"fixture").hexdigest()[:16] + ".json")
+        self.assertEqual((json.loads(path.read_text())["window_source"],
+                          json.loads(path.read_text())["level"]), ("rollout", "urgent"))
+        path.unlink()
+        self.invoke("PostToolUse", "codex", {"session_id": None})
+        self.assertFalse(path.exists())
+        writable = self.base / "writable"
+        self.assertIn("before starting", self.invoke("PostToolUse", "codex", environment={
+            **self.environment, "XDG_STATE_HOME": str(writable)}))
+        expected = self.stdout
+        self.assertTrue(list(writable.rglob("pressure/*.json")))
+        pressure_only = self.base / "pressure-only"
+        (pressure_only / "claude-harness").mkdir(parents=True)
+        (pressure_only / "claude-harness/pressure").write_text("file")
+        self.invoke("PostToolUse", "codex", environment={
+            **self.environment, "XDG_STATE_HOME": str(pressure_only)})
+        self.assertEqual(self.stdout, expected, "pressure write failure must not change output")
+        self.assertEqual((pressure_only / "claude-harness/pressure").read_text(), "file")
+        blocked = self.base / "blocked"
+        blocked.write_text("file")
+        self.invoke("PostToolUse", "codex", environment={
+            **self.environment, "XDG_STATE_HOME": str(blocked)})
+        self.assertEqual(self.stdout, expected, "unwritable state must not change output")
+        self.assertEqual(blocked.read_text(), "file")
+
     def test_reminders_repeat_until_checkpoint_changes(self):
         self.usage(99)
         self.assertEqual(self.invoke("PostToolUse"), "")
@@ -93,6 +228,18 @@ class CheckpointContract(unittest.TestCase):
         self.document.write_text("The validator passed. Next: inspect the diff.")
         self.usage(300)
         self.assertEqual(self.invoke("PostToolUse"), "")
+
+    def test_outline_and_urgent_name_in_flight(self):
+        outline = (ROOT / "hooks/checkpoint/outline.md").read_text()
+        self.assertEqual(outline.count("## In flight"), 1)
+        self.assertLess(outline.index("## Next move"), outline.index("## In flight"))
+        self.assertLess(outline.index("## In flight"), outline.index("## Working set"))
+        self.usage(100)
+        routine = self.invoke("PostToolUse")
+        self.assertNotIn("In flight", routine)
+        self.usage(200)
+        urgent = self.invoke("PostToolUse")
+        self.assertIn("In flight", urgent)
 
     def test_both_hosts_recover_and_rearm_reminders(self):
         for host in ("claude", "codex"):

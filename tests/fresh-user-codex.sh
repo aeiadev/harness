@@ -82,9 +82,14 @@ try:
                 for path in config.rglob("*") if path.is_file()}
 
     before = snapshot()
+    manifest_path = config / "harness/install-manifest.json"
+    initial_stamp = json.loads(manifest_path.read_text())["installed_at"]
     run(["bash", str(repo / "install.sh"), "--host", "codex", "--judge-permissions"], cwd=repo)
     run(["bash", str(repo / "install.sh"), "--host", "codex"], cwd=repo)
-    require(snapshot() == before, "repeat install must not duplicate hooks or rewrite files")
+    after = snapshot()
+    require(after == before, "repeat install must not duplicate hooks or rewrite owned files")
+    require(json.loads(manifest_path.read_text())["installed_at"] == initial_stamp,
+            "repeat install must keep the first install time")
 
     def hook(event, filename, tool=None, source=None, argument=None):
         for group in settings["hooks"].get(event, []):
@@ -178,14 +183,17 @@ try:
                  "transcript_path": str(transcript), "stop_hook_active": False,
                  "last_assistant_message": "Fresh-user checks complete."}, cwd=project).stdout
     message = json.loads(spend)["systemMessage"]
-    require("$--" in message and "cost unavailable" in message,
-            "Codex token usage without configured rates must leave spend unavailable")
+    require(message == "[harness] spend 1.2k tok" and "$" not in message,
+            "Codex token usage without configured rates must show the token count, not money")
     spend_file = state_root / "spend" / (hashlib.sha256(base["session_id"].encode()).hexdigest() + ".txt")
-    require(spend_file.is_file() and spend_file.read_text().strip() == "$--",
-            "spend fallback must write $-- without configured rates")
+    require(spend_file.is_file() and spend_file.read_text().strip() == "1.2k tok",
+            "unpriced spend file must hold the token count and no dollar amount")
 
     run(["bash", str(repo / "install.sh"), "--host", "codex", "--uninstall"], cwd=repo)
     require(json.loads(hooks_path.read_text()) == initial, "uninstall did not restore pre-existing configuration")
+    require(hooks_path.read_bytes() == (json.dumps(initial) + "\n").encode(), "uninstall did not restore exact hooks.json bytes")
+    require(not (config / "agents").exists() and not (config / "skills").exists(),
+            "uninstall left directories it created")
     require(config_path.read_bytes() == initial_config, "uninstall did not restore the original config.toml")
     require(not list((config / "agents").glob("*.toml")), "uninstall left owned agent TOMLs")
     require(not (config / "harness/install-manifest.json").exists(), "uninstall left the ownership manifest")
