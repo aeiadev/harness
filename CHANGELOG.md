@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3
+
+Pairs with Router 0.3.3.
+
+### Changed
+
+- Align the paired version with Router 0.3.3 for shared roles and CI resolution.
+
 ## 0.3.2
 
 Pairs with Router 0.3.2.
