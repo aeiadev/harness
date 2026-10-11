@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks/checkpoint"))
 import storage
 import journal
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, IS_WINDOWS, posix, python_shim  # noqa: E402
 
 
 class HelperTests(unittest.TestCase):
@@ -24,16 +27,16 @@ class HelperTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.bin = self.home / "bin"
         self.bin.mkdir()
-        self.bin.joinpath("python3").symlink_to(shutil.which("python3"))
+        python_shim(self.bin)
         self.env = {**os.environ, "HOME": str(self.home), "PATH": str(self.bin),
                     "XDG_STATE_HOME": str(self.home / "state")}
-        self.bash = shutil.which("bash")
+        self.bash = BASH
         self.log = self.home / "formatter.json"
         self.env["FORMATTER_LOG"] = str(self.log)
         self.env["HARNESS_AUTO_FORMAT"] = "1"
 
     def run_hook(self, hook, event):
-        result = subprocess.run([self.bash, str(ROOT / "hooks/helpers" / hook)],
+        result = subprocess.run([self.bash, posix(ROOT / "hooks/helpers" / hook)],
                                 input=json.dumps(event), text=True, capture_output=True,
                                 env=self.env, cwd=self.home, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -41,12 +44,17 @@ class HelperTests(unittest.TestCase):
         return result.stdout
 
     def formatter(self, name, code=0):
+        # A script that runs this interpreter: Git Bash cannot run a Windows-path shebang.
+        script = self.bin / f"{name}.py"
+        script.write_text("import json, os, sys\n"
+                          "with open(os.environ['FORMATTER_LOG'], 'w') as stream:\n"
+                          "    json.dump(sys.argv[1:], stream)\n"
+                          f"sys.exit({code})\n")
+        if IS_WINDOWS:  # the hook finds it with shutil.which and runs it directly, as it would ruff.exe
+            (self.bin / f"{name}.cmd").write_text(f'@"{sys.executable}" "{script}" "%~dpn0" %*\n')
+            return
         path = self.bin / name
-        path.write_text("#!" + shutil.which("python3") + "\n"
-                        "import json, os, sys\n"
-                        "with open(os.environ['FORMATTER_LOG'], 'w') as stream:\n"
-                        "    json.dump(sys.argv, stream)\n"
-                        f"sys.exit({code})\n")
+        path.write_bytes(f'#!/bin/sh\nexec {shlex.quote(posix(sys.executable))} {shlex.quote(posix(script))} "$0" "$@"\n'.encode("utf-8"))
         path.chmod(0o755)
 
     def test_formatter_missing_is_silent(self):
@@ -81,7 +89,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(output, "")
         args = json.loads(self.log.read_text())
         self.assertEqual(Path(args[0]).name, "ruff")
-        self.assertEqual(args[1:], ["format", "--", str(file)])
+        self.assertEqual(args[1:], ["format", "--", str(file.resolve())])
 
     def test_formatter_failure_is_silent(self):
         self.formatter("black", 1)
@@ -127,7 +135,8 @@ class HelperTests(unittest.TestCase):
         for data in (patch, {"patch": patch}, {"input": patch}):
             self.run_hook("auto-format.sh", {"tool_name": "apply_patch", "cwd": str(self.home),
                                             "tool_input": data, "turn_id": "turn"})
-            self.assertEqual(json.loads(self.log.read_text())[1:], ["format", "--", str(file)])
+            self.assertEqual(json.loads(self.log.read_text())[1:],
+                             ["format", "--", str(file.resolve())])
             self.log.unlink()
 
     def test_codex_stop_requires_successful_inspection(self):
@@ -144,7 +153,7 @@ class HelperTests(unittest.TestCase):
 
         def stop():
             path.write_text("\n".join(json.dumps(entry) for entry in entries))
-            return subprocess.run([self.bash, str(ROOT / "hooks/helpers/stop-check-verify-patch.sh")],
+            return subprocess.run([self.bash, posix(ROOT / "hooks/helpers/stop-check-verify-patch.sh")],
                 input=json.dumps({"transcript_path": str(path), "turn_id": "turn"}),
                 text=True, capture_output=True, env=self.env, timeout=5)
 
@@ -168,11 +177,16 @@ class HelperTests(unittest.TestCase):
                 "command": "python3 - <<'PY'\nimport ast\nast.parse(source)\nPY"}})
         self.assertIn("Python rewrite", json.loads(output)["hookSpecificOutput"]["additionalContext"])
 
-    def test_helpers_without_python_are_silent(self):
+    def test_helpers_without_python_warn_once(self):
         self.bin.joinpath("python3").unlink()
         for hook in ("auto-format.sh", "stop-check-verify-patch.sh", "verify-patch-landed-auto.sh"):
             with self.subTest(hook=hook):
-                self.assertEqual(self.run_hook(hook, {}), "")
+                result = subprocess.run([self.bash, posix(ROOT / "hooks/helpers" / hook)], input="{}", text=True,
+                                        capture_output=True, env=self.env, cwd=self.home, timeout=20)
+                # pyrun.sh: one stderr line and exit 1, never 2 (2 would block the turn or loop Stop).
+                self.assertEqual((result.returncode, result.stdout), (1, ""))
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                self.assertIn("no Python 3.9 or newer", result.stderr)
 
     def test_echoed_edits_do_not_trigger(self):
         for command in ("echo sed -i pattern sample.txt", "echo 'sed -i s/old/new/ sample.txt'",
@@ -227,7 +241,7 @@ class HelperTests(unittest.TestCase):
                 host = "codex" if codex else "claude"
                 self.assertEqual(journal.preferences(payload)["checkpoint_path"], host + ".md")
                 result = subprocess.run(
-                    [self.bash, str(ROOT / "hooks/helpers/stop-check-verify-patch.sh")],
+                    [self.bash, posix(ROOT / "hooks/helpers/stop-check-verify-patch.sh")],
                     input=json.dumps(payload), text=True, capture_output=True,
                     env=self.env, cwd=self.home, timeout=5,
                 )

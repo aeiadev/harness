@@ -4,16 +4,23 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 fresh_home="$(mktemp -d)"
+# pyrun.sh picks the interpreter the hooks use: python3, python or py -3, never the Store stub.
+python=$("$BASH" "$repo_root/hooks/pyrun.sh" --find harness)
 trap 'rm -rf -- "$fresh_home"' EXIT
+if [[ -n ${MSYSTEM:-} ]]; then export USERPROFILE="$(cygpath -w "$fresh_home")"; fi
 
 env HOME="$fresh_home" CLAUDE_HOME="$fresh_home/.claude" \
   XDG_STATE_HOME="$fresh_home/.local/state" \
-  python3 - "$repo_root" <<'PY'
+  "$python" - "$repo_root" <<'PY'
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
+from _platform import BASH, posix
 
 
 def require(condition, message):
@@ -46,7 +53,8 @@ try:
     config.mkdir()
     settings_path = config / "settings.json"
     settings_path.write_text("{}\n", encoding="utf-8")
-    run(["bash", str(repo / "install.sh"), "--host", "claude"], cwd=repo)
+    original_settings = settings_path.read_bytes()
+    run([BASH, posix(repo / "install.sh"), "--host", "claude"], cwd=repo)
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     require(isinstance(settings, dict), "installed settings must be a JSON object")
 
@@ -69,7 +77,7 @@ try:
     resume = hook("SessionStart", "dispatch.py", "resume")
     require("restore --host=claude" in resume, "resume hook must use Claude restore adapter")
     inject = hook("UserPromptSubmit", "inject-project-context.sh")
-    guard = hook("PreToolUse", "danger-cmd-guard.sh", "Bash")
+    guard = hook("PreToolUse", "guard/danger_cmd_guard.py", "Bash")
     hook("PostToolUse", "dispatch.py")
     hook("PostToolUse", "verify-patch-landed-auto.sh", "Bash")
     hook("PostToolUse", "auto-format.sh", "Write|Edit|MultiEdit")
@@ -84,14 +92,14 @@ try:
     run(["git", "init", "--quiet", str(project)], cwd=home)
     os.environ["CLAUDE_PROJECT_DIR"] = str(project)
     blocked = run(
-        ["bash", "-c", guard],
+        [BASH, "-c", guard],
         {"tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}, "cwd": str(project)},
         cwd=project,
         expected=2,
     )
     require(blocked.stderr or blocked.stdout, "blocked command must explain the rejection")
     run(
-        ["bash", "-c", guard],
+        [BASH, "-c", guard],
         {"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": str(project)},
         cwd=project,
     )
@@ -104,7 +112,7 @@ try:
         encoding="utf-8",
     )
     context = run(
-        ["bash", "-c", inject],
+        [BASH, "-c", inject],
         {"session_id": "fresh-user", "cwd": str(project), "hook_event_name": "UserPromptSubmit"},
         cwd=project,
     ).stdout
@@ -114,7 +122,7 @@ try:
         require(expected in context, f"context output is missing expected project data: {expected!r}")
 
     cost = run(
-        ["bash", "-c", status["command"]],
+        [BASH, "-c", status["command"]],
         {
             "cwd": str(project),
             "model": {"display_name": "Example"},
@@ -142,16 +150,16 @@ try:
         data = path.read_bytes()
         require(forbidden not in data, f"absolute home-directory path in {path.relative_to(config)}")
 
-    run(["bash", str(repo / "install.sh"), "--host", "claude", "--uninstall"], cwd=repo)
-    require(settings_path.read_bytes() == b"{}\n", "uninstall did not restore the exact original settings bytes")
+    run([BASH, posix(repo / "install.sh"), "--host", "claude", "--uninstall"], cwd=repo)
+    require(settings_path.read_bytes() == original_settings, "uninstall did not restore the exact original settings bytes")
     for relative in ("agents", "skills", "harness"):
         require(not (config / relative).exists(), f"uninstall left the {relative} directory it created")
     require(config.is_dir(), "uninstall removed the pre-existing config directory")
     require(list(config.glob("settings.json.harness-backup-*")), "uninstall without --purge removed backups")
-    purged = run(["bash", str(repo / "install.sh"), "--host", "claude", "--purge"], cwd=repo).stdout
+    purged = run([BASH, posix(repo / "install.sh"), "--host", "claude", "--purge"], cwd=repo).stdout
     require(b"Removed backup:" in purged and not list(config.glob("*.harness-backup-*")),
             "--purge did not remove Harness backups")
-    require(settings_path.read_bytes() == b"{}\n", "--purge changed settings")
+    require(settings_path.read_bytes() == original_settings, "--purge changed settings")
     print("PASS: fresh-user installation, all hook entries, guard, context cap, cost, portable paths, exact uninstall, and purge")
 except (AssertionError, OSError, ValueError, subprocess.TimeoutExpired) as error:
     print(f"FAIL: fresh-user: {error}", file=sys.stderr)

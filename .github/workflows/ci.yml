@@ -2,18 +2,86 @@ name: CI
 on:
   push:
   pull_request:
-
+defaults:
+  run:
+    shell: bash
 env:
-  ROUTER_REPOSITORY: aeiadev/router
-
+  ROUTER_REPOSITORY: ${{ vars.ROUTER_REPOSITORY || 'aeiadev/router' }}
+  ROUTER_PINNED_REF: ${{ vars.ROUTER_REF }}
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.10", "3.13"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.9", "3.13"]
     steps:
+      - name: Keep checkouts LF
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ROUTER_REPOSITORY }}
+          ref: ${{ env.ROUTER_PINNED_REF }}
+          path: router
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Old release trees
+        run: |
+          set -euo pipefail
+          base=$RUNNER_TEMP/old-trees
+          if command -v cygpath >/dev/null 2>&1; then base=$(cygpath -m "$base"); fi
+          old_tree() {
+            mkdir -p "$base/$2"
+            git -C "$1" archive --format=tar "$3" | tar -xf - -C "$base/$2"
+            echo "$4=$base/$2" >> "$GITHUB_ENV"
+          }
+          old_tree router router-0.1 36acbafd839886fdff9d7ba7a416d6a8fad13ec5 ROUTER_V01
+          old_tree router router-0.2 421454545008e0c361def01049989df5b9056b83 ROUTER_V02
+          old_tree . harness-0.1 063388b95632e935d53ba5ae058659b51960308d HARNESS_V01
+          old_tree . harness-0.2 3b80d6fbaa3d15970e6f0e1409d141b952f0b7f2 HARNESS_V02
+      - name: Router ref
+        run: |
+          set -euo pipefail
+          ref=$(bash scripts/router-ref.sh resolve router VERSION "$ROUTER_PINNED_REF")
+          git -C router checkout -q --detach "$ref"
+      - name: Tests
+        if: ${{ !cancelled() }}
+        env:
+          ROUTER_DIR: router
+        run: python tests/run_all.py
+      - name: Generated agents
+        if: ${{ !cancelled() }}
+        run: python codex/generate_agents.py --check
+      - name: Shared hashes
+        if: ${{ !cancelled() }}
+        run: |
+          cd agents
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum -c SHARED.sha256; else shasum -a 256 -c SHARED.sha256; fi
+      - name: Plugin drift
+        if: ${{ !cancelled() }}
+        run: python scripts/gen_plugin.py --check
+      - name: Plugin shared-roles
+        if: ${{ !cancelled() }}
+        run: diff -r plugins/shared-roles router/plugins/shared-roles
+      - name: Plugin validate
+        if: ${{ !cancelled() }}
+        run: if command -v claude >/dev/null; then claude plugin validate .; claude plugin validate plugins/harness; claude plugin validate plugins/shared-roles; fi
+  together:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.9", "3.13"]
+    steps:
+      - name: Keep checkouts LF
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -25,57 +93,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Prepare old release trees
-        shell: bash
+      - name: Old release trees
         run: |
-          mkdir -p "$RUNNER_TEMP/old-trees"
-          ROUTER_V01="$RUNNER_TEMP/old-trees/router-0.1"
-          ROUTER_V02="$RUNNER_TEMP/old-trees/router-0.2"
-          HARNESS_V01="$RUNNER_TEMP/old-trees/harness-0.1"
-          HARNESS_V02="$RUNNER_TEMP/old-trees/harness-0.2"
-          mkdir -p "$ROUTER_V01" "$ROUTER_V02" "$HARNESS_V01" "$HARNESS_V02"
-          git -C router archive --format=tar 36acbaf | tar -x -C "$ROUTER_V01"
-          git -C router archive --format=tar 4214545 | tar -x -C "$ROUTER_V02"
-          git archive --format=tar 063388b | tar -x -C "$HARNESS_V01"
-          git archive --format=tar 3b80d6f | tar -x -C "$HARNESS_V02"
-          echo "ROUTER_V01=$ROUTER_V01" >> "$GITHUB_ENV"
-          echo "ROUTER_V02=$ROUTER_V02" >> "$GITHUB_ENV"
-          echo "HARNESS_V01=$HARNESS_V01" >> "$GITHUB_ENV"
-          echo "HARNESS_V02=$HARNESS_V02" >> "$GITHUB_ENV"
-      - name: Python tests
-        env:
-          ROUTER_DIR: router
-        run: for t in tests/test_*.py; do python3 "$t" || exit 1; done
-      - name: Shell tests
-        run: for t in tests/test_*.sh; do bash "$t" || exit 1; done
-      - name: Fresh user tests
+          set -euo pipefail
+          base=$RUNNER_TEMP/old-trees
+          if command -v cygpath >/dev/null 2>&1; then base=$(cygpath -m "$base"); fi
+          old_tree() {
+            mkdir -p "$base/$2"
+            git -C "$1" archive --format=tar "$3" | tar -xf - -C "$base/$2"
+            echo "$4=$base/$2" >> "$GITHUB_ENV"
+          }
+          old_tree router router-0.1 36acbafd839886fdff9d7ba7a416d6a8fad13ec5 ROUTER_V01
+          old_tree router router-0.2 421454545008e0c361def01049989df5b9056b83 ROUTER_V02
+          old_tree . harness-0.1 063388b95632e935d53ba5ae058659b51960308d HARNESS_V01
+          old_tree . harness-0.2 3b80d6fbaa3d15970e6f0e1409d141b952f0b7f2 HARNESS_V02
+      - name: Router ref
         run: |
-          bash tests/fresh-user.sh
-          bash tests/fresh-user-codex.sh
-      - name: Generated agents
-        run: python3 codex/generate_agents.py --check
-      - name: Shared hashes
-        run: cd agents && shasum -a 256 -c SHARED.sha256
-      - name: Plugin drift
-        run: python3 scripts/gen_plugin.py --check
-      - name: Plugin shared-roles
-        run: diff -r plugins/shared-roles router/plugins/shared-roles
-      - name: Plugin validate
-        run: if command -v claude >/dev/null; then claude plugin validate .; claude plugin validate plugins/harness; claude plugin validate plugins/shared-roles; fi
-
-  together:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ROUTER_REPOSITORY }}
-          path: router
-      - name: Together with Router
-        env:
-          HARNESS_DIR: ${{ github.workspace }}
-        run: bash router/tests/together.sh
-
+          set -euo pipefail
+          ref=$(bash scripts/router-ref.sh resolve router VERSION "$ROUTER_PINNED_REF")
+          git -C router checkout -q --detach "$ref"
+      - name: Together
+        run: HARNESS_DIR=$PWD bash router/tests/together.sh
   secrets:
     runs-on: ubuntu-latest
     steps:

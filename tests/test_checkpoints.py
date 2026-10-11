@@ -12,6 +12,11 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+if os.name == "nt":  # Fixtures are LF UTF-8 on every platform, as a Linux or macOS checkout writes them.
+    Path.write_text = lambda self, data, encoding=None, errors=None, newline=None: self.write_bytes(
+        data.encode(encoding or "utf-8", errors or "strict"))
+    Path.read_text = lambda self, encoding=None, errors=None: self.read_bytes().decode(
+        encoding or "utf-8", errors or "strict")
 
 
 class CheckpointContract(unittest.TestCase):
@@ -24,7 +29,7 @@ class CheckpointContract(unittest.TestCase):
         self.home.mkdir()
         self.project.mkdir()
         (self.project / ".git").mkdir()
-        self.environment = dict(os.environ, HOME=str(self.home),
+        self.environment = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home),
                                 XDG_STATE_HOME=str(self.base / "local"),
                                 PYTHONDONTWRITEBYTECODE="1")
         self.environment.pop("CLAUDE_PROJECT_DIR", None)
@@ -48,17 +53,16 @@ class CheckpointContract(unittest.TestCase):
         wiring = json.loads(path.read_text())["hooks"][event_name]
         payload = {**self.event, **({"model": "gpt-example"} if host == "codex" else {}), **(fields or {})}
         commands = [item["command"] for group in wiring for item in group["hooks"]
-                    if "/checkpoint/" in item["command"] and
+                    if "checkpoint/dispatch.py" in item["command"] and
                     (event_name != "SessionStart" or group.get("matcher") == payload.get("source"))]
         if event_name == "SessionStart" and not commands:
             commands = [item["command"] for group in wiring if group.get("matcher") == "compact"
-                        for item in group["hooks"] if "/checkpoint/" in item["command"]]
+                        for item in group["hooks"] if "checkpoint/dispatch.py" in item["command"]]
         self.assertEqual(len(commands), 1, "Host needs one checkpoint handler for this event")
-        words = shlex.split(commands[0])
-        words[0] = sys.executable
-        words[1] = str(ROOT / words[1].split("/harness/", 1)[1])
+        words = shlex.split(commands[0])  # sh <hooks>/pyrun.sh harness <mode> <script beside pyrun.sh> [args]
+        words = [sys.executable, str(ROOT / "hooks" / words[4]), *words[5:]]
         outcome = subprocess.run(words, input=raw if raw is not None else json.dumps(payload),
-                                 text=True, capture_output=True, cwd=self.project,
+                                 text=True, encoding="utf-8", capture_output=True, cwd=self.project,
                                  env=environment or self.environment, timeout=5)
         self.assertEqual(outcome.returncode, 0, outcome.stderr)
         self.assertEqual(outcome.stderr, "")
@@ -169,8 +173,9 @@ class CheckpointContract(unittest.TestCase):
                           record["window"], record["window_source"], record["percent"],
                           record["level"]), (1, "claude", 100000, 200000,
                                              "statusline", 50.0, "ok"))
-        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name == "posix":  # Windows keeps no POSIX modes; profile ACLs guard the files
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         first = path.stat().st_ino
         self.usage(101000)
         self.invoke("PostToolUse", fields=fields)
@@ -217,7 +222,7 @@ class CheckpointContract(unittest.TestCase):
         self.usage(99)
         self.assertEqual(self.invoke("PostToolUse"), "")
         self.usage(100)
-        self.assertIn(str(self.document), self.invoke("PostToolUse"))
+        self.assertIn(str(self.document.resolve()), self.invoke("PostToolUse"))
         self.assertEqual(self.invoke("PostToolUse"), "")
         self.usage(200)
         self.assertIn("before starting", self.invoke("PostToolUse"))
@@ -327,9 +332,12 @@ class CheckpointContract(unittest.TestCase):
         self.assertIn("No readable checkpoint", self.recover())
 
     def test_fifo_and_directory_are_not_read_as_documents(self):
-        self.document.unlink()
-        os.mkfifo(self.document)
-        self.assertIn("No readable checkpoint", self.recover())
+        with self.subTest("fifo"):
+            if not hasattr(os, "mkfifo"):
+                self.skipTest("no FIFOs on Windows")
+            self.document.unlink()
+            os.mkfifo(self.document)
+            self.assertIn("No readable checkpoint", self.recover())
         self.document.unlink()
         self.document.mkdir()
         self.assertIn("No readable checkpoint", self.recover())
@@ -342,7 +350,7 @@ class CheckpointContract(unittest.TestCase):
 
     def test_restore_byte_ceiling_and_unicode_boundaries(self):
         for size in (3600, 3999, 4000, 4095, 4096, 6000):
-            self.document.write_text("界" * (size // 3))
+            self.document.write_text("界" * (size // 3), encoding="utf-8")
             for host in ("claude", "codex"):
                 with self.subTest(size=size, host=host):
                     text = self.invoke("SessionStart", host, {"source": "compact"})
@@ -367,7 +375,7 @@ class CheckpointContract(unittest.TestCase):
         self.assertEqual(len(snapshots), 3)
         self.assertTrue(all(p.read_bytes() == self.document.read_bytes() for p in snapshots))
         self.assertEqual(len(self.artifacts("summary.txt")), 2)
-        for file in (self.base / "local/claude-harness").rglob("*"):
+        for file in (self.base / "local/claude-harness").rglob("*") if os.name == "posix" else ():
             self.assertEqual(file.stat().st_mode & 0o777, 0o700 if file.is_dir() else 0o600)
         self.assertEqual(list(self.project.glob("**/receipt.json")), [])
         for receipt in self.artifacts("receipt.json"):
@@ -410,8 +418,11 @@ class CheckpointContract(unittest.TestCase):
         self.log.symlink_to(source)
         self.assertEqual(self.invoke("PostToolUse"), "")
         self.log.unlink()
-        os.mkfifo(self.log)
-        self.assertEqual(self.invoke("PostToolUse"), "")
+        with self.subTest("fifo"):
+            if not hasattr(os, "mkfifo"):
+                self.skipTest("no FIFOs on Windows")
+            os.mkfifo(self.log)
+            self.assertEqual(self.invoke("PostToolUse"), "")
 
 
 if __name__ == "__main__":

@@ -9,56 +9,69 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import pwd
+import posixpath
 import re
 import sys
 
-from shell_syntax import background_groups, command_input, command_segments, executed_string, literal_echoed_code, payload_host, substitutions, unwrap
+from shell_syntax import (assignments, background_groups, command_input, command_segments, executed_string,
+                          literal_echoed_code, payload_host, references, substitutions, unwrap)
 
 spec = importlib.util.spec_from_file_location("wait_loop_guard", Path(__file__).with_name("wait-loop-guard.py"))
 wait_guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wait_guard)
+spec = importlib.util.spec_from_file_location("harness_compat", Path(__file__).parent.parent / "checkpoint/compat.py")
+compat = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(compat)
+
+# Commands are POSIX shell text on every platform, so paths are compared as POSIX paths:
+# C:\Users\x and C:/Users/x are spelled /c/Users/x, and homes compare without case.
 
 
 def home_dirs():
-    homes = {"/root", os.path.expanduser("~"), os.environ.get("HOME", "")}
-    try:
-        homes.add(pwd.getpwuid(os.getuid()).pw_dir)
-    except KeyError:
-        pass
-    return {os.path.normpath(home) for home in homes if home and os.path.isabs(home)}
+    return {"/root"} | {home for home in compat.home_forms() if home.startswith("/")}
 
 
 def normalize_target(target):
+    target = compat.posix_form(target)
     for prefix in ("${HOME}", "$HOME", "~"):
         if target == prefix or target.startswith(prefix + "/"):
-            target = os.path.expanduser("~") + target[len(prefix):]
+            target = compat.posix_form(os.path.expanduser("~")) + target[len(prefix):]
             break
     # Trailing globs delete every child of the protected directory too.
     target = re.sub(r"/[*?]+$", "/", target)
-    target = os.path.normpath(target)
+    target = posixpath.normpath(target)
     if target.startswith("//"):
         target = "/" + target.lstrip("/")
     return target
 
 
+# A directory is a POSIX path, None for the one the command started in, or UNKNOWN: a cd the
+# guard cannot follow, such as cd "$DIR" or cd - with no earlier cd. Paths relative to UNKNOWN
+# are checked as if it were the home, so a protected name there is still caught.
+UNKNOWN = type("Unknown", (), {"__repr__": lambda self: "UNKNOWN"})()
+
+
 def resolve(target, cwd):
     """Join a relative path to the directory an earlier cd or pushd entered, when known."""
-    if cwd and not os.path.isabs(normalize_target(target)):
-        return os.path.normpath(os.path.join(cwd, target))
+    if cwd is UNKNOWN:
+        cwd = compat.posix_form(os.path.expanduser("~"))
+    if cwd and not posixpath.isabs(normalize_target(target)):
+        return posixpath.normpath(posixpath.join(cwd, compat.posix_form(target)))
     return target
 
 
 def literal_directory(target, cwd):
-    """Resolve a cd target written literally; anything expanded at run time is unknown (None)."""
+    """Resolve a cd target written literally; anything expanded at run time is UNKNOWN."""
     rest = next((target[len(prefix):] for prefix in ("${HOME}", "$HOME")
                  if target == prefix or target.startswith(prefix + "/")), target)
     if "$" in rest or "`" in target:
-        return None
+        return UNKNOWN
     target = normalize_target(target)
-    if os.path.isabs(target):
+    if posixpath.isabs(target):
         return target
-    return os.path.normpath(os.path.join(cwd, target)) if cwd else None
+    if cwd is UNKNOWN:
+        return UNKNOWN
+    return posixpath.normpath(posixpath.join(cwd, target)) if cwd else None
 
 
 def change_directory(name, args, cwd, stack, previous):
@@ -70,50 +83,47 @@ def change_directory(name, args, cwd, stack, previous):
         if args[:1] == ["--"]:
             args.pop(0)
         if args == ["-"]:
-            return previous, stack, cwd if cwd and previous else None
+            return previous, stack, cwd
         if len(args) > 1:
-            return None, stack, None
-        target = literal_directory(args[0] if args else "~", cwd)
-        return target, stack, cwd if cwd and target else None
+            return UNKNOWN, stack, cwd
+        return literal_directory(args[0] if args else "~", cwd), stack, cwd
     stay = False
     while args and args[0] == "-n":
         stay = True  # -n edits the stack without changing directory.
         args.pop(0)
     if args[:1] == ["--"]:
         args.pop(0)
-    # Like cd, a pushd or popd that changes directory sets the previous one (OLDPWD) to
-    # where it left, known only if both ends are known.
+    # Like cd, a pushd or popd that changes directory sets the previous one (OLDPWD) to where it left.
     if name == "pushd":
         if not args and not stay and stack:  # A bare pushd swaps the top two directories.
-            target = stack[-1]
-            return target, stack[:-1] + [cwd], cwd if cwd and target else None
+            return stack[-1], stack[:-1] + [cwd], cwd
         if len(args) != 1 or re.fullmatch(r"[-+]\d*", args[0]):  # rotate, OLDPWD or unseen stack
-            return (cwd if stay else None), [], previous if stay else None
+            return (cwd, [], previous) if stay else (UNKNOWN, [], cwd)
         target = literal_directory(args[0], cwd)
         if stay:
             return cwd, stack + [target], previous
-        return target, stack + [cwd], cwd if cwd and target else None
+        return target, stack + [cwd], cwd
     if args:
-        return (cwd if stay else None), [], previous if stay else None
+        return (cwd, [], previous) if stay else (UNKNOWN, [], cwd)
     if stay:
         return cwd, stack[:-1], previous
-    target = stack[-1] if stack else None
-    return target, stack[:-1], cwd if cwd and target else None
+    return (stack[-1] if stack else UNKNOWN), stack[:-1], cwd
 
 
 def protected_target(target):
     target = normalize_target(target)
     if target == "/":
         return True
-    if not os.path.isabs(target):
+    if not posixpath.isabs(target):
         return False
     # Removing a home's ancestor also removes the home, including ~/.. .
-    return any(os.path.commonpath((target, home)) == target for home in home_dirs())
+    target = target.lower()
+    return any(posixpath.commonpath((target, home)) == target for home in home_dirs())
 
 
 def protected_directory(target):
     """A .git directory anywhere, or a home's .ssh, .claude or .codex; not their children."""
-    parent, base = os.path.split(normalize_target(target))
+    parent, base = posixpath.split(normalize_target(target))
 
     def named(name):
         # A dot glob such as .git* or ~/.ss* also expands to the directory.
@@ -122,7 +132,7 @@ def protected_directory(target):
 
     if named(".git"):
         return True
-    return os.path.isabs(parent) and os.path.normpath(parent) in home_dirs() and any(
+    return posixpath.isabs(parent) and posixpath.normpath(parent).lower() in home_dirs() and any(
         named(name) for name in (".ssh", ".claude", ".codex"))
 
 
@@ -169,7 +179,7 @@ def has_long(names, option):
 
 
 def whole_tree(pathspec):
-    normalized = os.path.normpath(pathspec)
+    normalized = posixpath.normpath(pathspec)
     return (normalized == "." or all(part == ".." for part in normalized.split("/"))
             or pathspec in {":/", ":/.", "*", ":(top)"})
 
@@ -181,7 +191,7 @@ def explicit_file(pathspec, cwd=None):
     if pathspec.rsplit("/", 1)[-1] in {"", ".", ".."}:
         return False
     # Text cannot tell src from a file, so ask the filesystem (a stat, nothing runs).
-    return not os.path.isdir(resolve(normalize_target(pathspec), cwd))
+    return not os.path.isdir(compat.native_form(resolve(normalize_target(pathspec), cwd)))
 
 
 def explicit_files(long, operands, cwd=None):
@@ -192,7 +202,7 @@ def explicit_files(long, operands, cwd=None):
 def device_write(arg):
     if not arg.startswith("of="):
         return False
-    path = os.path.normpath(arg[3:])
+    path = posixpath.normpath(arg[3:])
     if path.startswith("//"):
         path = "/" + path.lstrip("/")
     # Pseudo devices that discard or forward output are not disks.
@@ -288,8 +298,28 @@ def download_piped_to_shell(command):
     return False
 
 
+ROOT_DELETE_REASON = ("Recursive deletion of the filesystem root, a user's home, or its ancestor is blocked. "
+                      "Choose a specific subdirectory.")
+STATE_DELETE_REASON = ("Recursive deletion of a .git directory or of ~/.ssh, ~/.claude or ~/.codex is blocked. "
+                       "Remove a specific path inside it instead.")
+
+
+def deletion_reason(targets, cwd=None):
+    resolved = [resolve(target, cwd) for target in targets]
+    if any(protected_target(target) for target in resolved):
+        return ROOT_DELETE_REASON
+    if any(protected_directory(target) for target in resolved):
+        return STATE_DELETE_REASON
+    return None
+
+
 def git_destructive(args, cwd=None):
     action, rest = args[0], args[1:]
+    if action == "rm":
+        # git rm -r also deletes the matched files from the work tree; --cached keeps them there.
+        short, long, operands = split_options(rest, "", ("pathspec-from-file",))
+        if "r" in short and not ("n" in short or has_long(long, "dry-run") or has_long(long, "cached")):
+            return deletion_reason(operands, cwd)
     if action == "clean":
         short, long, _ = split_options(rest, "e", ("exclude",))
         if ("f" in short or has_long(long, "force")) and not ("n" in short or has_long(long, "dry-run")):
@@ -336,9 +366,13 @@ def inspect(command, background=False, depth=0, loop_bounded=False, inherited_el
         return DOWNLOAD_REASON
     # cwd follows literal cd, pushd and popd; an inner sh -c or bash -c starts where its caller is.
     dirstack = []
-    previous = None
+    previous = UNKNOWN  # The shell's OLDPWD before this command is not visible here.
     cwd_stack = []
+    assigned = {}
     for raw_words, separator, redirects in command_segments(command):
+        for variable, value in assignments(raw_words):
+            echoed = literal_echoed_code(value)
+            assigned[variable] = value if echoed is None else echoed
         words, timed, elevated = unwrap(raw_words)
         if not words:
             if separator == "(":
@@ -371,11 +405,9 @@ def inspect(command, background=False, depth=0, loop_bounded=False, inherited_el
                 else:
                     targets.append(arg)
             recursive = any(arg == "--recursive" or (not arg.startswith("--") and re.search("[rR]", arg[1:])) for arg in options)
-            resolved = [resolve(target, cwd) for target in targets]
-            if recursive and any(protected_target(target) for target in resolved):
-                return "Recursive deletion of the filesystem root, a user's home, or its ancestor is blocked. Choose a specific subdirectory."
-            if recursive and any(protected_directory(target) for target in resolved):
-                return "Recursive deletion of a .git directory or of ~/.ssh, ~/.claude or ~/.codex is blocked. Remove a specific path inside it instead."
+            reason = deletion_reason(targets, cwd) if recursive else None
+            if reason:
+                return reason
         if name == "dd" and any(device_write(arg) for arg in words[1:]):
             return "dd to a device (of=/dev/...) overwrites a disk. Write to a regular file instead."
         if name == "mkfs" or name.startswith("mkfs."):
@@ -406,6 +438,14 @@ def inspect(command, background=False, depth=0, loop_bounded=False, inherited_el
                              inherited_elevated or elevated, cwd, lookup_cwd)
             if reason:
                 return reason
+        # A shell that runs $x (sh -c, eval, or $x as the command) runs what this line assigned to x.
+        ran = [words[0]] + ([nested] if nested is not None else [])
+        for variable, value in assigned.items():
+            if any(references(text, variable) for text in ran):
+                reason = inspect(value, False, depth + 1, loop_bounded or timed,
+                                 inherited_elevated or elevated, cwd, lookup_cwd)
+                if reason:
+                    return reason
         if separator == "(":
             cwd_stack.append((cwd, dirstack, previous))
         elif separator == ")" and cwd_stack:
@@ -418,7 +458,7 @@ def inspect(command, background=False, depth=0, loop_bounded=False, inherited_el
 
 def main():
     try:
-        payload = json.load(sys.stdin)
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except (json.JSONDecodeError, UnicodeError):
         return 0
     shell_input = command_input(payload)
@@ -429,7 +469,10 @@ def main():
     # Claude tracks its run_in_background tasks, so only the timeout rule is
     # skipped there; the command is still inspected. Codex has no such option.
     payload_cwd = payload.get("cwd") if isinstance(payload, dict) else None
-    if not isinstance(payload_cwd, str) or not os.path.isabs(payload_cwd) or not os.path.isdir(payload_cwd):
+    if isinstance(payload_cwd, str):
+        payload_cwd = compat.posix_form(payload_cwd)
+    if (not isinstance(payload_cwd, str) or not posixpath.isabs(payload_cwd)
+            or not os.path.isdir(compat.native_form(payload_cwd))):
         payload_cwd = None
     reason = inspect(command, background and host != "claude", lookup_cwd=payload_cwd)
     if reason == BACKGROUND_REASON:

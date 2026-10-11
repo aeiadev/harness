@@ -6,11 +6,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, posix  # noqa: E402
 ROLES = ("sweeper", "researcher", "planner", "builder", "builder-in-place",
          "judge", "worker", "test-writer", "docs-writer")
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -42,7 +45,7 @@ class SharedInstallTests(unittest.TestCase):
                "CLAUDE_HOME": str(self.home / ".claude"),
                "CODEX_HOME": str(self.home / ".codex"),
                "XDG_CONFIG_HOME": str(self.home / ".config"), "XDG_STATE_HOME": str(self.home / ".state")}
-        result = subprocess.run(["bash", str(ROOT / "install.sh"), "--host", host, *flags],
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--host", host, *flags],
                                 env=env, stdin=subprocess.DEVNULL, capture_output=True,
                                 text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -84,6 +87,85 @@ class SharedInstallTests(unittest.TestCase):
 
     def shipped(self, host, name):
         return (ROOT / ("agents" if host == "claude" else "codex/agents") / Path(name).name).read_bytes()
+
+    def test_home_comes_from_HOME_when_python_reads_USERPROFILE(self):
+        """Windows Python's Path.home() reads USERPROFILE only; Git Bash and Claude Code use HOME.
+        A sitecustomize makes Path.home() behave that way here, so this runs on every OS."""
+        sim = self.home / "sim"
+        sim.mkdir()
+        (sim / "sitecustomize.py").write_text(
+            "import os, pathlib\npathlib.Path.home = classmethod(lambda cls: cls(os.environ['USERPROFILE']))\n")
+        profile = self.home / "profile"
+        profile.mkdir()
+        env = {key: value for key, value in os.environ.items() if key not in ("CLAUDE_HOME", "CODEX_HOME")}
+        env.update(HOME=str(self.home), USERPROFILE=str(profile), XDG_CONFIG_HOME=str(self.home / ".config"),
+                   XDG_STATE_HOME=str(self.home / ".state"),
+                   PYTHONPATH=os.pathsep.join(filter(None, (str(sim), env.get("PYTHONPATH")))))
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--host", "both"], env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for host in ("claude", "codex"):
+            self.assertTrue((self.home / f".{host}/harness/install-manifest.json").is_file(), host)
+        self.assertEqual(sorted(profile.iterdir()), [])
+
+    def test_status_names_state_paths_from_HOME_when_python_reads_USERPROFILE(self):
+        """--status prints a state path below HOME relative to it, also where Path.home() reads USERPROFILE
+        (Windows Python). A sitecustomize makes Path.home() behave that way here, so this runs on every OS."""
+        sim = self.home / "sim"
+        sim.mkdir()
+        (sim / "sitecustomize.py").write_text(
+            "import os, pathlib\npathlib.Path.home = classmethod(lambda cls: cls(os.environ['USERPROFILE']))\n")
+        profile = self.home / "profile"
+        profile.mkdir()
+        cache = self.home / ".local/state/claude-harness"
+        cache.parent.mkdir(parents=True)
+        cache.write_text("not a directory")
+        env = {**os.environ, "HOME": str(self.home), "USERPROFILE": str(profile),
+               "CLAUDE_HOME": str(self.home / ".claude"), "XDG_STATE_HOME": str(self.home / ".local/state"),
+               "PYTHONPATH": os.pathsep.join(filter(None, (str(sim), os.environ.get("PYTHONPATH"))))}
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--status", "--host", "claude"], env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertIn("\nlast hook write: unknown (.local/state/claude-harness not readable: ", result.stdout,
+                      result.stdout + result.stderr)
+
+    def test_manifest_names_use_slashes_where_paths_print_backslashes(self):
+        """Windows prints Path('a/b') as a\\b. The manifest keeps a/b, the form Router and the hook
+        commands use. A sitecustomize makes str(Path) print backslashes here, as_posix() slashes, so this runs on every OS."""
+        sim = self.home / "sim"
+        sim.mkdir()
+        (sim / "sitecustomize.py").write_text(
+            "import pathlib\n_str = pathlib.PurePosixPath.__str__\npathlib.PurePosixPath.as_posix = _str\n"
+            "pathlib.PurePosixPath.__str__ = lambda self: _str(self) if self.is_absolute() else _str(self).replace('/', '\\\\')\n")
+        env = {**os.environ, "HOME": str(self.home), "CLAUDE_HOME": str(self.home / ".claude"),
+               "CODEX_HOME": str(self.home / ".codex"), "XDG_STATE_HOME": str(self.home / ".state"),
+               "PYTHONPATH": os.pathsep.join(filter(None, (str(sim), os.environ.get("PYTHONPATH"))))}
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--host", "claude"], env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = json.loads((self.home / ".claude/harness/install-manifest.json").read_text(encoding="utf-8"))
+        names = list(manifest["files"]) + list(manifest.get("created_dirs", []))
+        self.assertIn("agents/sweeper.md", names)
+        self.assertIn("harness/hooks/checkpoint", names)
+        self.assertEqual([name for name in names if "\\" in name], [])
+
+    def test_backslash_names_from_an_old_windows_install_still_own_their_files(self):
+        """Harness 0.1 and 0.2 on Windows recorded harness\\hooks\\x.py. An upgrade reads them as
+        harness/hooks/x.py: --status sees no leftovers, and the upgrade neither refuses the files as foreign
+        nor keeps the old form."""
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                self.run_install(host)
+                path = self.home / f".{host}/harness/install-manifest.json"
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                manifest["files"] = {name.replace("/", "\\"): item for name, item in manifest["files"].items()}
+                manifest["created_dirs"] = [name.replace("/", "\\") for name in manifest["created_dirs"]]
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+                status = self.run_install(host, "--status")
+                self.assertRegex(status, r"\nfiles: \d+ current\nleftovers: none\n")
+                self.run_install(host)
+                names = list(json.loads(path.read_text(encoding="utf-8"))["files"])
+                self.assertIn("harness/hooks/checkpoint/dispatch.py", names)
+                self.assertEqual([name for name in names if "\\" in name], [])
 
     def test_same_version_claim_on_old_role_bytes_is_released(self):
         for host in ("claude", "codex"):
@@ -135,7 +217,7 @@ class SharedInstallTests(unittest.TestCase):
 
     def test_version_stamp(self):
         from datetime import datetime, timezone
-        self.assertEqual((ROOT / "VERSION").read_text().strip(), "0.3.0")
+        self.assertRegex((ROOT / "VERSION").read_text(), r"\A\d+\.\d+\.\d+\n\Z")
         for host in ("claude", "codex"):
             with self.subTest(host=host):
                 self.run_install(host)
@@ -144,7 +226,7 @@ class SharedInstallTests(unittest.TestCase):
                     manifest = json.loads(path.read_text())
                     self.assertIs(type(manifest["version"]), int)
                     self.assertEqual(manifest["version"], 1)
-                    self.assertEqual(manifest["package"], "0.3.0")
+                    self.assertEqual(manifest["package"], VERSION)
                     self.assertEqual(manifest["source"], str(ROOT))
                     self.assertIs(type(manifest["installed_at"]), str)
                     self.assertEqual(datetime.fromisoformat(manifest["installed_at"]).utcoffset(), timezone.utc.utcoffset(None))
@@ -178,7 +260,7 @@ class SharedInstallTests(unittest.TestCase):
 
         before = tree_hash(claude)
         env = {**os.environ, "HOME": str(self.home), "CLAUDE_HOME": str(claude), "CODEX_HOME": str(codex)}
-        result = subprocess.run(["bash", str(ROOT / "install.sh"), "--host", "both"], env=env,
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--host", "both"], env=env,
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("refusing to overwrite", result.stderr)
@@ -212,7 +294,7 @@ class SharedInstallTests(unittest.TestCase):
                     path = manifest if case == "bad_manifest" else settings
                     env = {**os.environ, "HOME": str(self.home), "CLAUDE_HOME": str(self.home / ".claude"),
                            "CODEX_HOME": str(self.home / ".codex")}
-                    result = subprocess.run(["bash", str(ROOT / "install.sh"), "--host", host], env=env,
+                    result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--host", host], env=env,
                                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                     self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)

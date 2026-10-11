@@ -2,21 +2,31 @@
 """Exact uninstall, created paths, upgrade cleanup, shared-role skew, --purge and VERSION.
 
 Old releases come from old-trees.sh (HARNESS_V01, HARNESS_V02, ROUTER_V02). A test that
-needs one and finds it unset fails; it never skips.
+needs one and finds it unset fails. Under a python3 older than 3.10 the old releases run
+with a newer python3 from PATH, and are skipped only when none exists.
 """
 
+import ast
+import atexit
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import (BASH, IS_WINDOWS, home_env, posix, posix_modes, python_shim,  # noqa: E402
+                       skip_unless_posix_modes)
 HOSTS = ("claude", "codex")
 SETTINGS = {"claude": "settings.json", "codex": "hooks.json"}
 ROLES = ("sweeper", "researcher", "planner", "builder", "builder-in-place",
@@ -26,6 +36,46 @@ HAND_FORMATTED = (b'{\n\t"zeta":   1,\n\t"alpha": [1,2, 3],\n\t"hooks": {"Stop":
                   b'\t"note": "tabs, key order, no trailing newline"\n}')
 EXTRAS = {"claude": ("agents/Explore.md", "agents/Plan.md", "agents/general-purpose.md"),
           "codex": ("agents/seat-judge.toml", "agents/seat-builder.toml")}
+
+
+RELEASED_PYTHON = {}  # shim folders keyed by the installer's actual Python floor
+
+
+def released_env(env, tree):
+    """Use a Python meeting this tree's floor, without reusing a lower-floor shim."""
+    if env.get("HOME"):
+        env = dict(env, **home_env(env["HOME"]))
+    match = re.search(r"sys\.version_info < \((\d+), (\d+)\)", (Path(tree) / "install.sh").read_text())
+    floor = tuple(map(int, match.groups())) if match else (3, 9)
+    if sys.version_info >= floor and not IS_WINDOWS:
+        return env
+    if floor not in RELEASED_PYTHON:
+        found = sys.executable if sys.version_info >= floor else None
+        if found is None:
+            search = os.environ.get("PATH", os.defpath)
+            names = [f"python3.{minor}" for minor in range(20, floor[1] - 1, -1)] + ["python3", "python", "py"]
+            for name in names:
+                candidate = shutil.which(name, path=search)
+                if not candidate:
+                    continue
+                args = [candidate] + (["-3"] if name == "py" else [])
+                try:
+                    result = subprocess.run(args + ["-c", "import sys; print(sys.executable) if sys.version_info >= "
+                                                    + repr(floor) + " else sys.exit(1)"],
+                                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if result.returncode == 0 and result.stdout.strip():
+                    found = result.stdout.strip()
+                    break
+        if found is None:
+            raise unittest.SkipTest("the release installer needs Python " + ".".join(map(str, floor))
+                                    + " or newer; none is on PATH")
+        folder = Path(tempfile.mkdtemp(prefix="harness-released-python-"))
+        atexit.register(shutil.rmtree, folder, True)
+        python_shim(folder, found)
+        RELEASED_PYTHON[floor] = str(folder)
+    return dict(env, PATH=RELEASED_PYTHON[floor] + os.pathsep + env.get("PATH", os.defpath))
 
 
 def old_tree(name):
@@ -71,7 +121,14 @@ class Base(unittest.TestCase):
         home = home or self.home
         env = {**os.environ, "HOME": str(home), "CLAUDE_HOME": str(home / ".claude"),
                "CODEX_HOME": str(home / ".codex")}
-        result = subprocess.run(["bash", str(Path(tree) / "install.sh"), "--host", host, *flags],
+        env = released_env(env, tree)
+        if IS_WINDOWS and Path(tree).resolve() != ROOT and "--uninstall" in flags:
+            # Released installers copy source modes but cannot unlink NTFS read-only files.
+            # Keep their historical behavior intact and make only the old fixture writable.
+            for folder, _, names in os.walk(home):
+                for name in names:
+                    os.chmod(os.path.join(folder, name), stat.S_IREAD | stat.S_IWRITE)
+        result = subprocess.run([BASH, posix(Path(tree) / "install.sh"), "--host", host, *flags],
                                 env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                 timeout=60)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
@@ -150,12 +207,15 @@ class ExactUninstallTests(Base):
                 self.run_install(host)
                 manifest = self.manifest(host)
                 # 0.1 named no backup: the oldest one holds the settings before Harness, and it is 0600.
-                self.assertEqual((manifest["settings_original_backup"], manifest["settings_original_sha256"],
-                                  manifest["settings_original_mode"]),
-                                 (old.name, sha(json.dumps(initial).encode()), 0o600))
+                self.assertEqual((manifest["settings_original_backup"], manifest["settings_original_sha256"]),
+                                 (old.name, sha(json.dumps(initial).encode())))
+                modes = posix_modes(self, "the 0o600 settings mode recorded and restored")
+                if modes:
+                    self.assertEqual(manifest["settings_original_mode"], 0o600)
                 self.run_install(host, "--uninstall")
-                self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)),
-                                 (json.dumps(initial).encode(), 0o600))
+                self.assertEqual(path.read_bytes(), json.dumps(initial).encode())
+                if modes:
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_v02_upgrade_then_uninstall_is_surgical(self):
         tree = old_tree("HARNESS_V02")
@@ -180,7 +240,9 @@ class ExactUninstallTests(Base):
                                  (True, old.name, sha(b'{"keep": 1}')), "an upgrade recorded Harness's own file as the original")
                 self.run_install(host, "--uninstall")
                 self.assertEqual(self.harness_commands(host), [], "uninstall restored a file with 0.2 hooks")
-                self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), (b'{"keep": 1}', 0o600))
+                self.assertEqual(path.read_bytes(), b'{"keep": 1}')
+                if posix_modes(self, "the 0o600 settings mode restored"):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 class CreatedPathTests(Base):
@@ -284,7 +346,7 @@ class UpgradeCleanupTests(Base):
                     self.assertFalse((top / relative).exists(), f"left no-longer-shipped {relative}")
                     self.assertIn(f"Removed no-longer-shipped: {relative}", output)
                     self.assertNotIn(relative, self.manifest(host)["files"])
-                for relative in self.manifest(host)["files"]:
+                for relative in self.manifest(host)["files"] if posix_modes(self, "installed files 0o644 or 0o755") else ():
                     mode = stat.S_IMODE((top / relative).stat().st_mode)
                     self.assertIn(mode, (0o644, 0o755), f"{relative} has mode {oct(mode)}")
                 self.run_install(host, "--uninstall")
@@ -392,6 +454,7 @@ class OldInstallFolderTests(Base):
 class SettingsModeTests(Base):
     """D-P2: a rewrite keeps an existing settings file's mode; a new one is 0600, as Router 0.3."""
 
+    @skip_unless_posix_modes("settings modes 0o644, 0o640 and 0o600 kept across rewrites")
     def test_rewrites_keep_the_existing_mode(self):
         for host in HOSTS:
             for mode in (0o644, 0o640, 0o600):
@@ -410,6 +473,7 @@ class SettingsModeTests(Base):
                     self.assertEqual(path.read_bytes(), HAND_FORMATTED)
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
 
+    @skip_unless_posix_modes("a settings mode 0o644 kept after an edit")
     def test_a_rewrite_by_a_second_run_after_an_edit_keeps_the_mode(self):
         for host in HOSTS:
             with self.subTest(host=host):
@@ -426,6 +490,103 @@ class SettingsModeTests(Base):
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
                 shutil.rmtree(path.parent)
 
+    def test_kept_mode_drops_setuid_setgid_and_sticky(self):
+        # The policy itself, with a stand-in stat result, so a host without POSIX modes checks it too.
+        body = (ROOT / "install.sh").read_text(encoding="utf-8").split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        function = next(node for node in ast.parse(body).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "settings_mode")
+
+        class Settings:
+            def __init__(self, mode):
+                self.mode = mode
+
+            def stat(self):
+                if self.mode is None:
+                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), "settings.json")
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | self.mode)
+
+        cases = ((0o4640, 0o640), (0o2640, 0o640), (0o1640, 0o640), (0o7777, 0o777),
+                 (0o644, 0o644), (0o640, 0o640), (None, 0o600))
+        for given, expected in cases:
+            with self.subTest(mode=None if given is None else oct(given)):
+                scope = {"stat": stat, "settings_path": Settings(given)}
+                exec(compile(ast.Module(body=[function], type_ignores=[]), "install.sh", "exec"), scope)
+                self.assertEqual(oct(scope["settings_mode"]()), oct(expected))
+
+    @skip_unless_posix_modes("setuid, setgid and sticky bits dropped from a kept settings mode")
+    def test_rewrites_drop_setuid_setgid_and_sticky(self):
+        for host in HOSTS:
+            for mode in (0o4640, 0o2640, 0o1640, 0o6640):
+                with self.subTest(host=host, mode=oct(mode)):
+                    shutil.rmtree(self.host_home(host), ignore_errors=True)
+                    self.host_home(host).mkdir()
+                    path = self.settings_path(host)
+                    path.write_bytes(HAND_FORMATTED)
+                    try:
+                        path.chmod(mode)
+                    except OSError as error:
+                        self.skipTest(f"cannot set {oct(mode)} on a file here: {error.strerror}")
+                    if stat.S_IMODE(path.stat().st_mode) != mode:
+                        self.skipTest(f"the OS did not keep {oct(mode)} on a file")
+                    self.run_install(host)  # the install write
+                    self.assertEqual(oct(stat.S_IMODE(path.stat().st_mode)), oct(0o640))
+                    settings = json.loads(path.read_text())
+                    settings["user"] = 1  # not the original any more: uninstall merges and rewrites
+                    path.write_text(json.dumps(settings))
+                    path.chmod(mode)
+                    self.run_install(host, "--uninstall")
+                    self.assertEqual(json.loads(path.read_text()).get("user"), 1)
+                    self.assertEqual(oct(stat.S_IMODE(path.stat().st_mode)), oct(0o640))
+
+    def test_restore_without_a_recorded_mode_drops_setuid_setgid_and_sticky(self):
+        # The uninstall restore fallback, with a stand-in settings file, so every OS checks it.
+        body = (ROOT / "install.sh").read_text(encoding="utf-8").split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        function = next((node for node in ast.parse(body).body
+                         if isinstance(node, ast.FunctionDef) and node.name == "restore_mode"), None)
+        self.assertIsNotNone(function, "install.sh has no restore_mode()")
+
+        class Settings:
+            def __init__(self, mode):
+                self.mode = mode
+
+            def exists(self):
+                return self.mode is not None
+
+            def stat(self):
+                if self.mode is None:
+                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), "settings.json")
+                return types.SimpleNamespace(st_mode=stat.S_IFREG | self.mode)
+
+        cases = ((None, 0o4640, 0o640), (None, 0o2640, 0o640), (None, 0o1640, 0o640), (None, 0o7777, 0o777),
+                 (None, 0o644, 0o644), (None, None, 0o600), (0o600, 0o4640, 0o600), (0o644, None, 0o644))
+        for wanted, current, expected in cases:
+            with self.subTest(wanted=wanted and oct(wanted), current=current and oct(current)):
+                scope = {"stat": stat, "settings_path": Settings(current)}
+                exec(compile(ast.Module(body=[function], type_ignores=[]), "install.sh", "exec"), scope)
+                self.assertEqual(oct(scope["restore_mode"](wanted)), oct(expected))
+
+    @skip_unless_posix_modes("setuid dropped when uninstall restores a settings file with no recorded mode")
+    def test_uninstall_restore_drops_setuid(self):
+        for host in HOSTS:
+            with self.subTest(host=host):
+                shutil.rmtree(self.host_home(host), ignore_errors=True)
+                self.host_home(host).mkdir()
+                path = self.settings_path(host)
+                path.write_bytes(HAND_FORMATTED)
+                try:
+                    path.chmod(0o4640)
+                except OSError as error:
+                    self.skipTest(f"cannot set 0o4640 on a file here: {error.strerror}")
+                if stat.S_IMODE(path.stat().st_mode) != 0o4640:
+                    self.skipTest("the OS did not keep 0o4640 on a file")
+                self.run_install(host)
+                self.assertIsNone(self.manifest(host).get("settings_original_mode"))  # no mode recorded
+                path.chmod(0o4640)
+                self.run_install(host, "--uninstall")
+                self.assertEqual(path.read_bytes(), HAND_FORMATTED)  # the restore, not a merge
+                self.assertEqual(oct(stat.S_IMODE(path.stat().st_mode)), oct(0o640))
+
+    @skip_unless_posix_modes("a new settings file is 0o600")
     def test_new_settings_file_is_private(self):
         for host in HOSTS:
             with self.subTest(host=host):
@@ -435,7 +596,8 @@ class SettingsModeTests(Base):
 
     def test_router_v02_first_then_harness_uninstalled_first_restores_bytes_and_mode(self):
         router = old_tree("ROUTER_V02")
-        original = (json.dumps({"zeta": 1, "alpha": [1, 2, 3]}, indent=2) + "\n").encode()
+        # Router 0.2 writes text in the platform's native newline convention.
+        original = (json.dumps({"zeta": 1, "alpha": [1, 2, 3]}, indent=2) + "\n").replace("\n", os.linesep).encode()
         for host in HOSTS:
             with self.subTest(host=host):
                 shutil.rmtree(self.host_home(host), ignore_errors=True)
@@ -448,7 +610,8 @@ class SettingsModeTests(Base):
                 self.run_install(host, "--uninstall")
                 self.run_tree(router, host, "--uninstall")
                 self.assertEqual(path.read_bytes(), original)
-                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+                if posix_modes(self, "restored settings mode is 0o644"):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
 
 
 class SharedRoleSkewTests(Base):
@@ -520,6 +683,7 @@ class PurgeAndVersionTests(Base):
         self.run_install("codex", "--judge-permissions")
         return sorted(self.home.rglob("*.harness-backup-*"))
 
+    @skip_unless_posix_modes("backups are 0o600")
     def test_backups_are_private(self):
         backups = self.make_backups()
         names = {path.name.split(".harness-backup-")[0] for path in backups}
@@ -566,6 +730,8 @@ class PurgeAndVersionTests(Base):
         shutil.copytree(ROOT, dist, ignore=shutil.ignore_patterns(".git", "__pycache__", "tests"))
         version = dist / "VERSION"
         for case in ("missing", "unreadable", "empty"):
+            if case == "unreadable" and not posix_modes(self, "a mode 000 VERSION"):
+                continue
             with self.subTest(case=case):
                 if version.exists():
                     version.chmod(0o644)

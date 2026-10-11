@@ -4,11 +4,14 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 fresh_home="$(mktemp -d)"
+# pyrun.sh picks the interpreter the hooks use: python3, python or py -3, never the Store stub.
+python=$("$BASH" "$repo_root/hooks/pyrun.sh" --find harness)
 trap 'rm -rf -- "$fresh_home"' EXIT
+if [[ -n ${MSYSTEM:-} ]]; then export USERPROFILE="$(cygpath -w "$fresh_home")"; fi
 
 env HOME="$fresh_home" CODEX_HOME="$fresh_home/codex home" \
   XDG_STATE_HOME="$fresh_home/.local/state" \
-  python3 - "$repo_root" <<'PY'
+  "$python" - "$repo_root" <<'PY'
 import hashlib
 import json
 import os
@@ -17,6 +20,10 @@ import re
 import shlex
 import subprocess
 import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
+from _platform import BASH, posix
 
 
 def require(condition, message):
@@ -49,12 +56,13 @@ try:
         "PreToolUse": [{"matcher": "Read", "hooks": [{"type": "command", "command": "true"}]}],
     }}
     hooks_path.write_text(json.dumps(initial) + "\n", encoding="utf-8")
+    initial_hooks = hooks_path.read_bytes()
     config_path = config / "config.toml"
     initial_config = (b'# Keep the user profile and default selection.\n'
                       b'default_permissions = "personal"\n\n'
                       b'[permissions.personal.filesystem]\n":root" = "read"\n')
     config_path.write_bytes(initial_config)
-    installed = run(["bash", str(repo / "install.sh"), "--host", "codex", "--judge-permissions"], cwd=repo)
+    installed = run([BASH, posix(repo / "install.sh"), "--host", "codex", "--judge-permissions"], cwd=repo)
     require(b"/hooks" in installed.stdout and b"Trust" in installed.stdout,
             "installer must tell users to trust new hooks in Codex /hooks")
     settings = json.loads(hooks_path.read_text(encoding="utf-8"))
@@ -84,8 +92,8 @@ try:
     before = snapshot()
     manifest_path = config / "harness/install-manifest.json"
     initial_stamp = json.loads(manifest_path.read_text())["installed_at"]
-    run(["bash", str(repo / "install.sh"), "--host", "codex", "--judge-permissions"], cwd=repo)
-    run(["bash", str(repo / "install.sh"), "--host", "codex"], cwd=repo)
+    run([BASH, posix(repo / "install.sh"), "--host", "codex", "--judge-permissions"], cwd=repo)
+    run([BASH, posix(repo / "install.sh"), "--host", "codex"], cwd=repo)
     after = snapshot()
     require(after == before, "repeat install must not duplicate hooks or rewrite owned files")
     require(json.loads(manifest_path.read_text())["installed_at"] == initial_stamp,
@@ -134,23 +142,23 @@ try:
     ) + "\n"
     (project / "STATE.md").write_text(state_text, encoding="utf-8")
     base = {"session_id": "fresh-codex", "turn_id": "fixture-turn", "model": "gpt-6-sol", "cwd": str(project)}
-    guard = hook("PreToolUse", "danger-cmd-guard.sh", tool="exec_command")
+    guard = hook("PreToolUse", "guard/danger_cmd_guard.py", tool="exec_command")
     for command in ("rm -rf ~", "for ((;;)); do sleep 1; done", "rm -rf ~/..", 'sudo bash -c "rm x"'):
-        blocked = run(["bash", "-c", guard],
+        blocked = run([BASH, "-c", guard],
                       {**base, "hook_event_name": "PreToolUse", "tool_name": "exec_command", "tool_input": {"cmd": command}},
                       cwd=project, expected=2)
         require(blocked.stdout or blocked.stderr, "guard rejection must give a reason")
-    run(["bash", "-c", guard],
+    run([BASH, "-c", guard],
         {**base, "hook_event_name": "PreToolUse", "tool_name": "exec_command", "tool_input": {"cmd": "ls"}}, cwd=project)
 
     inject = hook("SessionStart", "inject-project-context.sh", source="startup")
-    context = run(["bash", "-c", inject], {**base, "hook_event_name": "SessionStart", "source": "startup"}, cwd=project).stdout
+    context = run([BASH, "-c", inject], {**base, "hook_event_name": "SessionStart", "source": "startup"}, cwd=project).stdout
     require(b"AGENTS.md" in context and b"Codex fixture checkpoint" in context, "startup did not load project instructions and state")
     require(len(context) <= 4000, "startup project context exceeds its byte limit")
     precompact = hook("PreCompact", "dispatch.py", argument="snapshot")
-    run(["bash", "-c", precompact], {**base, "hook_event_name": "PreCompact", "trigger": "auto"}, cwd=project)
+    run([BASH, "-c", precompact], {**base, "hook_event_name": "PreCompact", "trigger": "auto"}, cwd=project)
     compact = hook("SessionStart", "dispatch.py", argument="restore", source="compact")
-    restored = run(["bash", "-c", compact], {**base, "hook_event_name": "SessionStart", "source": "compact"}, cwd=project).stdout
+    restored = run([BASH, "-c", compact], {**base, "hook_event_name": "SessionStart", "source": "compact"}, cwd=project).stdout
     restored_text = json.loads(restored)["hookSpecificOutput"]["additionalContext"]
     require("Codex fixture checkpoint" in restored_text, "compaction did not restore STATE.md")
     require(len(restored_text.encode()) <= 4000, "compaction context exceeds its byte limit")
@@ -158,7 +166,7 @@ try:
     transcript = home / "rollout.jsonl"
     transcript.write_text(json.dumps({"type": "compacted", "payload": {"message": summary, "replacement_history": []}}) + "\n")
     postcompact = hook("PostCompact", "dispatch.py", argument="archive")
-    run(["bash", "-c", postcompact],
+    run([BASH, "-c", postcompact],
         {**base, "hook_event_name": "PostCompact", "trigger": "auto", "transcript_path": str(transcript)}, cwd=project)
     state_root = home / ".local/state/claude-harness"
     summaries = list((state_root / "checkpoints").glob("*/*/archive/*/summary.txt"))
@@ -178,7 +186,7 @@ try:
                                       "output_tokens": 200}}}},
         ):
             stream.write(json.dumps(entry) + "\n")
-    spend = run(["bash", "-c", spend_hook],
+    spend = run([BASH, "-c", spend_hook],
                 {**base, "hook_event_name": "Stop", "permission_mode": "default",
                  "transcript_path": str(transcript), "stop_hook_active": False,
                  "last_assistant_message": "Fresh-user checks complete."}, cwd=project).stdout
@@ -189,9 +197,9 @@ try:
     require(spend_file.is_file() and spend_file.read_text().strip() == "1.2k tok",
             "unpriced spend file must hold the token count and no dollar amount")
 
-    run(["bash", str(repo / "install.sh"), "--host", "codex", "--uninstall"], cwd=repo)
+    run([BASH, posix(repo / "install.sh"), "--host", "codex", "--uninstall"], cwd=repo)
     require(json.loads(hooks_path.read_text()) == initial, "uninstall did not restore pre-existing configuration")
-    require(hooks_path.read_bytes() == (json.dumps(initial) + "\n").encode(), "uninstall did not restore exact hooks.json bytes")
+    require(hooks_path.read_bytes() == initial_hooks, "uninstall did not restore exact hooks.json bytes")
     require(not (config / "agents").exists() and not (config / "skills").exists(),
             "uninstall left directories it created")
     require(config_path.read_bytes() == initial_config, "uninstall did not restore the original config.toml")
@@ -200,9 +208,9 @@ try:
     require(not (config / "harness/hooks/guard/danger-cmd-guard.sh").exists(), "uninstall left owned runtime files")
     existing_profile = b'[permissions.harness-judge.filesystem]\n":root" = "read"\n'
     config_path.write_bytes(existing_profile)
-    run(["bash", str(repo / "install.sh"), "--host", "codex", "--judge-permissions"], cwd=repo)
+    run([BASH, posix(repo / "install.sh"), "--host", "codex", "--judge-permissions"], cwd=repo)
     require(config_path.read_bytes() == existing_profile, "installer overwrote an existing judge profile")
-    run(["bash", str(repo / "install.sh"), "--host", "codex", "--uninstall"], cwd=repo)
+    run([BASH, posix(repo / "install.sh"), "--host", "codex", "--uninstall"], cwd=repo)
     require(config_path.read_bytes() == existing_profile, "uninstall removed an unowned judge profile")
     print("PASS: Codex fresh-user install, trusted-hook guidance, merge, roles, judge session permissions, guards, continuity, spend, repeat install, and uninstall")
 except (AssertionError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:

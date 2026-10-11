@@ -8,6 +8,8 @@ from pathlib import Path
 import stat
 import tempfile
 
+import compat
+
 
 def quantity(value, fallback=None):
     if isinstance(value, bool):
@@ -46,8 +48,10 @@ def uses_codex(event):
 
 def local_cache():
     chosen = os.environ.get("XDG_STATE_HOME", "")
-    base = Path(chosen) if chosen and Path(chosen).is_absolute() else Path.home() / ".local/state"
-    return base / "claude-harness"
+    base = Path(chosen) if chosen and compat.state_is_absolute(chosen) else Path.home() / ".local/state"
+    # The user picks the base, links included (/var on macOS, a linked HOME); resolve it once
+    # so locked_directory refuses only links inside Harness's own state folder.
+    return Path(os.path.realpath(base)) / "claude-harness"
 
 
 def guarded_read(path, ceiling, tail=False):
@@ -55,7 +59,7 @@ def guarded_read(path, ceiling, tail=False):
     if not isinstance(path, (str, Path)) or not str(path):
         return None, False
     try:
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as stream:
+        with compat.open_read(path) as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode):
                 return None, False
@@ -100,7 +104,7 @@ def replace_private(path, content):
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
-        os.replace(temporary, path)
+        compat.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
 

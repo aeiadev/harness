@@ -16,7 +16,7 @@ def main():
     import storage
     import spend
 
-    data = storage.object_value(json.load(sys.stdin))
+    data = storage.object_value(json.loads(sys.stdin.buffer.read()))
     key = storage.conversation_tag(data)
     if not key or data.get("agent_id"):
         return

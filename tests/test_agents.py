@@ -9,12 +9,15 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, IS_WINDOWS, posix, posix_modes, python_shim, shim  # noqa: E402
 EXPECTED_MODELS = {
     "sweeper": "haiku",
     "researcher": "sonnet",
@@ -64,7 +67,7 @@ def parse_agent(path):
 
 
 def parse_codex(path):
-    """Validate generated string/boolean TOML tables without dependencies on 3.10."""
+    """Validate generated string/boolean TOML tables without tomllib, absent on 3.9."""
     fields = {}
     table = fields
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -196,7 +199,7 @@ class AgentTests(unittest.TestCase):
 
     def test_codex_generator_detects_drift(self):
         result = subprocess.run(
-            ["python3", str(ROOT / "codex" / "generate_agents.py"), "--check"],
+            [sys.executable, str(ROOT / "codex" / "generate_agents.py"), "--check"],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -250,6 +253,29 @@ class AgentTests(unittest.TestCase):
                     parse_agent(Fixture(text))
 
 
+def wired(command, host_home):
+    """A template command as install.sh writes it into HOST_HOME (~/.claude or ~/.codex): unchanged off
+    Windows; on Windows the "$HOME/.<host>/..." script becomes a quoted C:/ path, since a PowerShell
+    fallback may not expand $HOME."""
+    if not IS_WINDOWS:
+        return command
+    prefix = f"$HOME/{host_home.name}/"
+    return " ".join(shlex.quote(host_home.as_posix() + "/" + word[len(prefix):] if word.startswith(prefix) else word)
+                    for word in shlex.split(command))
+
+
+def wired_settings(template, host_home):
+    """TEMPLATE with every hook and statusLine command as wired()."""
+    settings = copy.deepcopy(template)
+    for groups in settings["hooks"].values():
+        for group in groups:
+            for hook in group["hooks"]:
+                hook["command"] = wired(hook["command"], host_home)
+    if "statusLine" in settings:
+        settings["statusLine"]["command"] = wired(settings["statusLine"]["command"], host_home)
+    return settings
+
+
 class InstallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="harness-install-test-")
@@ -265,12 +291,16 @@ class InstallTests(unittest.TestCase):
         for relative in (
             "hooks/context/inject-project-context.sh",
             "hooks/guard/danger-cmd-guard.sh",
+            "hooks/guard/danger_cmd_guard.py",
             "hooks/helpers/auto-format.sh",
             "hooks/helpers/verify-patch-landed-auto.sh",
             "hooks/helpers/stop-check-verify-patch.sh",
             "hooks/checkpoint/dispatch.py",
             "hooks/checkpoint/storage.py",
+            "hooks/checkpoint/compat.py",
             "hooks/checkpoint/journal.py",
+            "hooks/context/inject_project_context.py",
+            "hooks/helpers/auto_format.py",
             "hooks/checkpoint/policy.json",
             "hooks/checkpoint/outline.md",
             "hooks/checkpoint/guide.md",
@@ -282,6 +312,8 @@ class InstallTests(unittest.TestCase):
             path = self.source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"fixture: {relative}\n", encoding="utf-8")
+        shutil.copy2(ROOT / "hooks/pyrun.sh", self.source / "hooks/pyrun.sh")  # install.sh finds Python with it
+        shutil.copy2(ROOT / "hooks/checkpoint/compat.py", self.source / "hooks/checkpoint/compat.py")  # and the home
         self.user_home = self.root / "user"
         self.user_home.mkdir()
         self.claude_home = self.user_home / ".claude"
@@ -291,7 +323,7 @@ class InstallTests(unittest.TestCase):
 
     def run_install(self, *flags, success=True, env=None):
         result = subprocess.run(
-            ["bash", str(self.source / "install.sh"), "--host", "claude", *flags],
+            [BASH, posix(self.source / "install.sh"), "--host", "claude", *flags],
             env=env or self.env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -320,7 +352,8 @@ class InstallTests(unittest.TestCase):
 
     def test_fresh_install_wires_every_example_hook(self):
         self.run_install()
-        expected = json.loads((self.source / "examples" / "settings.example.json").read_text())
+        expected = wired_settings(json.loads((self.source / "examples" / "settings.example.json").read_text()),
+                                  self.claude_home)
         self.assertEqual(self.settings(), expected)
         self.assertTrue((self.claude_home / "harness/hooks/guard/danger-cmd-guard.sh").is_file())
         self.assertTrue((self.claude_home / "harness/statusline/statusline.py").is_file())
@@ -363,6 +396,16 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(self.claude_home.exists())
 
+    def test_dry_run_writes_no_bytecode_under_apple_python(self):
+        # macOS /usr/bin/python3 writes standard-library bytecode under
+        # ~/Library/Caches/com.apple.python through sys.pycache_prefix as it starts.
+        env = {**self.env, "PYTHONPYCACHEPREFIX": str(self.user_home / "Library/Caches/com.apple.python")}
+        before = self.snapshot()
+        self.run_install("--dry-run", env=env)
+        self.run_install("--dry-run", "--uninstall", env=env)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse((self.user_home / "Library").exists())
+
     def test_dry_run_does_not_change_existing_install(self):
         self.run_install()
         before = self.snapshot()
@@ -376,7 +419,9 @@ class InstallTests(unittest.TestCase):
         self.run_install()
         self.assertEqual(self.settings()["statusLine"], previous)
         self.run_install("--statusline")
-        self.assertIn("harness/statusline/statusline.py", self.settings()["statusLine"]["command"])
+        template = json.loads((self.source / "examples" / "settings.example.json").read_text())
+        self.assertIn("pyrun.sh\" harness status ../statusline/statusline.py", template["statusLine"]["command"])
+        self.assertEqual(self.settings()["statusLine"]["command"], wired(template["statusLine"]["command"], self.claude_home))
         self.run_install("--statusline")
         self.run_install("--uninstall")
         self.assertEqual(self.settings(), {"statusLine": previous})
@@ -386,7 +431,8 @@ class InstallTests(unittest.TestCase):
         env = {**self.env, "CLAUDE_HOME": str(self.claude_home)}
         self.run_install(env=env)
         command = self.settings()["statusLine"]["command"]
-        self.assertEqual(shlex.split(command), ["python3", str(self.claude_home / "harness/statusline/statusline.py")])
+        self.assertEqual(shlex.split(command), ["sh", (self.claude_home / "harness/hooks/pyrun.sh").as_posix(), "harness", "status",
+                                                "../statusline/statusline.py"])
         self.assertFalse((self.user_home / ".claude").exists())
         self.run_install("--uninstall", env=env)
         self.assertFalse((self.claude_home / "settings.json").exists(), "uninstall left the settings file it created")
@@ -491,7 +537,8 @@ class InstallTests(unittest.TestCase):
         env = {**self.env, **({"CLAUDE_HOME": str(self.claude_home)} if custom_home else {})}
         if kind == "preexisting":
             path = self.claude_home / "harness/hooks/guard/danger-cmd-guard.sh"
-            command = f"bash {shlex.quote(str(path))}" if custom_home else 'bash "$HOME/.claude/harness/hooks/guard/danger-cmd-guard.sh"'
+            launcher = shlex.quote((path.parent.parent / "pyrun.sh").as_posix()) if custom_home else '"$HOME/.claude/harness/hooks/pyrun.sh"'
+            command = wired(f"sh {launcher} harness block guard/danger_cmd_guard.py", self.claude_home)  # exactly what Harness installs
             self.write_settings({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": command, "timeout": 25}]}]}})
         self.run_install(env=env)
         settings = self.settings()
@@ -572,7 +619,8 @@ class InstallTests(unittest.TestCase):
         self.run_install("--uninstall")
 
     def test_matching_preexisting_hooks_remain_unowned_but_shared_role_is_claimed(self):
-        expected = json.loads((self.source / "examples" / "settings.example.json").read_text())
+        expected = wired_settings(json.loads((self.source / "examples" / "settings.example.json").read_text()),
+                                  self.claude_home)
         initial = {"hooks": {"PreToolUse": copy.deepcopy(expected["hooks"]["PreToolUse"])}}
         initial["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 25
         self.write_settings(initial)
@@ -606,6 +654,13 @@ class InstallTests(unittest.TestCase):
         self.assertIn("missing installation requirement: hooks/context/inject-project-context.sh", result.stderr)
         self.assertEqual(self.snapshot(), before)
 
+    def test_missing_template_is_named_with_forward_slashes(self):
+        (self.source / "examples/settings.example.json").unlink()
+        before = self.snapshot()
+        result = self.run_install(success=False)
+        self.assertIn("missing installation requirement: examples/settings.example.json", result.stderr)
+        self.assertEqual(self.snapshot(), before)
+
     def test_preexisting_empty_manifest_is_not_overwritten(self):
         manifest = self.claude_home / "harness/install-manifest.json"
         manifest.parent.mkdir(parents=True)
@@ -629,7 +684,7 @@ class InstallTests(unittest.TestCase):
         no_python = self.root / "empty-path"
         no_python.mkdir()
         result = subprocess.run(
-            [shutil.which("bash"), str(self.source / "install.sh")],
+            [BASH, posix(self.source / "install.sh")],
             env={**self.env, "PATH": str(no_python)},
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -653,7 +708,7 @@ class CodexInstallTests(unittest.TestCase):
         self.codex_home = self.user_home / ".codex"
 
     def run_install(self, *flags, host="codex", success=True, env=None):
-        command = ["bash", str(self.source / "install.sh")]
+        command = [BASH, posix(self.source / "install.sh")]
         if host is not None:
             command += ["--host", host]
         result = subprocess.run(
@@ -717,7 +772,8 @@ class CodexInstallTests(unittest.TestCase):
         backups = list(self.codex_home.glob("config.toml.harness-backup-*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), initial)
-        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        if posix_modes(self, "a 0o600 config backup"):
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
         self.run_install("--uninstall")
         self.assertEqual(target.read_bytes(), initial)
 
@@ -813,8 +869,9 @@ class CodexInstallTests(unittest.TestCase):
         # locally installed model CLI. Neither CLI is ever executed.
         path = self.root / "bin"
         path.mkdir()
-        for name in ("python3", "dirname", "bash"):
-            (path / name).symlink_to(shutil.which(name))
+        python_shim(path)
+        shim(path, "bash", BASH)
+        shim(path, "dirname", shutil.which("dirname"))
         env = {**self.env, "PATH": str(path)}
         result = self.run_install(host=None, env=env, success=False)
         self.assertIn("no host found", result.stderr)
@@ -837,7 +894,7 @@ class CodexInstallTests(unittest.TestCase):
             for group in groups:
                 for entry in group["hooks"]:
                     words = shlex.split(entry["command"])
-                    self.assertTrue(words[1].startswith(str(self.codex_home / "harness") + "/"))
+                    self.assertTrue(words[1].startswith((self.codex_home / "harness").as_posix() + "/"))
                     self.assertTrue(Path(words[1]).is_file())
         self.assertFalse((self.user_home / ".codex").exists())
         self.run_install("--uninstall", env=env)

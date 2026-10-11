@@ -171,7 +171,7 @@ def pending_edit(transcript):
 
 def main():
     try:
-        payload = json.load(sys.stdin)
+        payload = json.loads(sys.stdin.buffer.read())
     except (ValueError, OSError):
         return
     if not isinstance(payload, dict):

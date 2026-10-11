@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OWNER = {"name": "AEIA", "url": "https://aeia.dev"}
 REPOSITORY = "https://github.com/aeiadev/harness"
 MANAGED = (".claude-plugin", "plugins")
-SCRIPT = re.compile(r'(bash|python3) "\$HOME/\.claude/harness/hooks/([\w/-]+\.(?:sh|py))"(.*)')
+SCRIPT = re.compile(r'(bash|sh) "\$HOME/\.claude/harness/hooks/([\w/-]+\.(?:sh|py))"(.*)')
 GUARD = ('[ -e "${{CLAUDE_HOME:-$HOME/.claude}}/harness/install-manifest.json" ] || '
          '{program} "${{CLAUDE_PLUGIN_ROOT}}/hooks/{script}"{args}')
 HARNESS_DESCRIPTION = ("Checkpoint and context hooks, guard and verification helpers, "
@@ -98,6 +98,7 @@ def expected():
             relative = path.relative_to(ROOT).as_posix()
             if not path.is_dir() and not ignored(relative):
                 files[f"plugins/harness/{relative}"] = source(relative)
+    files["plugins/harness/hooks/pyrun.sh"] = source("hooks/pyrun.sh")
     for folder in ("checkpoint", "project-handoff", "skill-index", "tdd", "verify-patch-landed"):
         for path in sorted((ROOT / "skills" / folder).rglob("*")):
             relative = path.relative_to(ROOT).as_posix()

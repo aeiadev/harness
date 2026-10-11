@@ -11,6 +11,12 @@ from journal import Notebook
 from storage import utf8_prefix
 
 
+def emit(text):
+    """Write UTF-8 whatever the console code page (a Windows pipe is cp1252)."""
+    sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+    sys.stdout.flush()
+
+
 def handle():
     try:
         event = json.loads(sys.stdin.buffer.read(1024 * 1024))
@@ -31,7 +37,7 @@ def handle():
         tokens = event.get("context_tokens")
         if isinstance(tokens, int) and not isinstance(tokens, bool):
             message += f" Context: {tokens} tokens."
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+        emit(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                      "additionalContext": utf8_prefix(message, 160)}}, ensure_ascii=False))
         return
     if action == "restore" and event.get("source") != "compact":
@@ -45,7 +51,7 @@ def handle():
     else:
         message = journal.restore()
     if message:
-        print(json.dumps({"hookSpecificOutput": {
+        emit(json.dumps({"hookSpecificOutput": {
             "hookEventName": "SessionStart" if action == "restore" else "PostToolUse",
             "additionalContext": utf8_prefix(message, 4000)}}, ensure_ascii=False))
 

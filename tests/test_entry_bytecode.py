@@ -16,6 +16,8 @@ KNOWN = {
     Path("hooks/checkpoint/dispatch.py"),
     Path("hooks/guard/danger_cmd_guard.py"),
     Path("hooks/helpers/_verification.py"),
+    Path("hooks/helpers/auto_format.py"),
+    Path("hooks/context/inject_project_context.py"),
     Path("statusline/statusline.py"),
     Path("statusline/spend_hook.py"),
 }
@@ -32,6 +34,10 @@ def configured_entries(root=ROOT):
         if "statusLine" in settings:
             commands.append(settings["statusLine"]["command"])
         for command in commands:
+            found = re.search(r'pyrun\.sh"? harness \w+ ([\w./-]+\.py)', command)  # beside hooks/pyrun.sh
+            if found:
+                entries.add(Path(os.path.normpath(os.path.join("hooks", found.group(1)))))
+                continue
             found = re.search(r"(?:hooks|statusline)/[\w/-]+\.py", command)
             if found:
                 entries.add(Path(found.group()))
@@ -42,7 +48,7 @@ def configured_entries(root=ROOT):
             shell = root / found.group()
             source = shell.read_text()
             for line in source.splitlines():
-                if re.search(r"\bexec python3\b", line):
+                if re.search(r"\bexec (?:python3\b|\$python\b|\"\$BASH\" \S*pyrun\.sh)", line):
                     script = re.search(r"([\w-]+\.py)\b", line)
                     if script:
                         entries.add(shell.parent.relative_to(root) / script.group(1))
@@ -70,8 +76,28 @@ def missing_bytecode_line(root, entries):
     return sorted(e for e in entries if not has_bytecode_line(root, e))
 
 
-def cache_leaks(root, entries):
-    """Run each entry from a temp copy; return entries that failed or left a cache."""
+def interpreter_prefix(env, cwd):
+    """The child's sys.pycache_prefix: Apple's /usr/bin/python3 sets one by default."""
+    result = subprocess.run([sys.executable, "-c", "import sys; print(sys.pycache_prefix or '')"],
+                            capture_output=True, text=True, env=env, cwd=cwd, timeout=10)
+    return Path(result.stdout.strip()) if result.stdout.strip() else None
+
+
+def written_bytecode(base, prefix):
+    """Bytecode for the copied tree: in __pycache__ beside it, or mirrored under the prefix."""
+    found = set(base.rglob("__pycache__"))
+    if prefix is not None:
+        for tree in {base, base.resolve()}:
+            found |= set((prefix / str(tree).lstrip(os.sep)).rglob("*.pyc"))
+    return found
+
+
+def cache_leaks(root, entries, pycache_prefix=None):
+    """Run each entry from a temp copy; return entries that failed or left bytecode.
+
+    pycache_prefix, relative to the temporary HOME, stands in for macOS /usr/bin/python3,
+    which writes bytecode under ~/Library/Caches/com.apple.python instead of __pycache__.
+    """
     bad = []
     with tempfile.TemporaryDirectory(prefix="harness-bytecode-") as temp:
         base = Path(temp)
@@ -84,18 +110,41 @@ def cache_leaks(root, entries):
         state.mkdir()
         env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(state))
         env.pop("PYTHONDONTWRITEBYTECODE", None)
+        if pycache_prefix:
+            env["PYTHONPYCACHEPREFIX"] = str(home / pycache_prefix)
+        prefix = interpreter_prefix(env, base)
         for entry in sorted(entries):
-            before = set(base.rglob("__pycache__"))
+            before = written_bytecode(base, prefix)
             result = subprocess.run([sys.executable, str(base / entry)], input="{}",
                                     capture_output=True, text=True, env=env,
                                     cwd=base, timeout=10)
-            if result.returncode != 0 or set(base.rglob("__pycache__")) != before:
+            if result.returncode != 0 or written_bytecode(base, prefix) != before:
                 bad.append(entry)
     return bad
 
 
-def run_no_cache_check(root):
-    return cache_leaks(root, configured_entries(root))
+def run_no_cache_check(root, pycache_prefix=None):
+    return cache_leaks(root, configured_entries(root), pycache_prefix)
+
+
+def synthetic_tree(base):
+    """Copy the configured tree to base and wire a hook that leaves bytecode behind."""
+    for dirname in ("hooks", "statusline", "examples", "codex"):
+        shutil.copytree(ROOT / dirname, base / dirname,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    synth = base / "hooks/newhook"
+    synth.mkdir()
+    (synth / "helper.py").write_text("VALUE = 1\n")
+    (synth / "newhook.py").write_text(
+        '"""Synthetic hook."""\nimport sys\nsys.path.insert(0, sys.path[0])\n'
+        "import helper\n")
+    config = base / "examples/settings.example.json"
+    settings = json.loads(config.read_text())
+    settings["hooks"]["Stop"].append({"hooks": [{
+        "type": "command",
+        "command": "python3 $HOME/.claude/hooks/newhook/newhook.py"}]})
+    config.write_text(json.dumps(settings))
+    return configured_entries(base)
 
 
 class EntryBytecodeTests(unittest.TestCase):
@@ -111,28 +160,20 @@ class EntryBytecodeTests(unittest.TestCase):
     def test_new_configured_hook_without_bytecode_line_goes_red(self):
         with tempfile.TemporaryDirectory(prefix="harness-synth-") as temp:
             base = Path(temp)
-            for dirname in ("hooks", "statusline", "examples", "codex"):
-                shutil.copytree(ROOT / dirname, base / dirname,
-                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-            synth = base / "hooks/newhook"
-            synth.mkdir()
-            (synth / "helper.py").write_text("VALUE = 1\n")
-            (synth / "newhook.py").write_text(
-                '"""Synthetic hook."""\nimport sys\nsys.path.insert(0, sys.path[0])\n'
-                "import helper\n")
-            config = base / "examples/settings.example.json"
-            settings = json.loads(config.read_text())
-            settings["hooks"]["Stop"].append({"hooks": [{
-                "type": "command",
-                "command": "python3 $HOME/.claude/hooks/newhook/newhook.py"}]})
-            config.write_text(json.dumps(settings))
-            entries = configured_entries(base)
+            entries = synthetic_tree(base)
             self.assertIn(Path("hooks/newhook/newhook.py"), entries)
             self.assertIn(Path("hooks/newhook/newhook.py"), missing_bytecode_line(base, entries))
             self.assertEqual(run_no_cache_check(base), [Path("hooks/newhook/newhook.py")])
             self.assertEqual(missing_bytecode_line(ROOT, configured_entries()), [])
             self.assertEqual(cache_leaks(base, entries - {Path("hooks/newhook/newhook.py")}), [])
 
+    def test_leak_is_found_when_the_interpreter_uses_a_pycache_prefix(self):
+        apple = "Library/Caches/com.apple.python"
+        self.assertEqual(run_no_cache_check(ROOT, apple), [])
+        with tempfile.TemporaryDirectory(prefix="harness-synth-") as temp:
+            base = Path(temp)
+            synthetic_tree(base)
+            self.assertEqual(run_no_cache_check(base, apple), [Path("hooks/newhook/newhook.py")])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

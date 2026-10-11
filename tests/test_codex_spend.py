@@ -12,6 +12,8 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "tests"))
+from _platform import skip_unless_posix_modes  # noqa: E402
 
 
 class SpendTests(unittest.TestCase):
@@ -144,9 +146,14 @@ class SpendTests(unittest.TestCase):
         marker.write_text(json.dumps(marks))
         self.assertIsNotNone(self.run_hook(data))
 
-    def test_side_file_is_private_and_ignores_color_threshold(self):
+    def test_side_file_ignores_color_threshold(self):
         self.run_hook({**self.payload, "cost": {"total_cost_usd": 3}},
                       env=dict(self.env, HARNESS_SPEND_WARN="1"))
+        self.assertEqual(self.side_text(), "$3.00")
+
+    @skip_unless_posix_modes("0o700 spend folder and 0o600 side files; profile ACLs guard them on Windows")
+    def test_side_file_is_private(self):
+        self.run_hook({**self.payload, "cost": {"total_cost_usd": 3}})
         self.assertEqual(self.side_text(), "$3.00")
         self.assertEqual(self.directory.stat().st_mode & 0o777, 0o700)
         for path in self.directory.iterdir():
@@ -186,10 +193,14 @@ class SpendTests(unittest.TestCase):
         self.assertEqual(self.side_text(), "1000.0k tok")
 
     def test_fifo_and_symlink_transcripts_do_not_hang(self):
-        os.mkfifo(self.transcript)
-        self.run_hook(env=self.rates())
-        self.assertFalse(self.side_file().exists())
-        self.transcript.unlink()
+        with self.subTest("fifo"):
+            if not hasattr(os, "mkfifo"):
+                print(f"SKIP {self.id()} FIFO transcript: no FIFOs on Windows", file=sys.stderr, flush=True)
+                self.skipTest("no FIFOs on Windows")
+            os.mkfifo(self.transcript)
+            self.run_hook(env=self.rates())
+            self.assertFalse(self.side_file().exists())
+        self.transcript.unlink(missing_ok=True)
         self.transcript.symlink_to(self.base / "absent")
         self.run_hook(env=self.rates())
         self.assertFalse(self.side_file().exists())

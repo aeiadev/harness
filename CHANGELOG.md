@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.3.1
+
+Pairs with Router 0.3.1. An older Router that installed different shared roles keeps them, and the installer prints one notice to upgrade it.
+
+### Fixed
+
+- Treat Windows permission bits consistently on Python 3.13, which exposes `fchmod` but cannot enforce private POSIX modes.
+- Fall back from incomplete UNC `XDG_STATE_HOME` values consistently in the launcher and Python runtime across Python 3.9 and 3.13.
+
+- Write the pressure file, checkpoint pin and reminder state when HOME or XDG_STATE_HOME sits behind a symbolic link (macOS `/var`, a linked home folder); a link inside Harness's own state folder is still refused.
+- Block a shell that runs a variable the same command line set to destructive code, such as `sh -c "$x"` after `x=$(echo ...)`, through `sh -c`, `eval` or `$x` as the command; `sh -c "$cmd"` with nothing destructive in sight still runs.
+- Check relative paths after a `cd` the guard cannot follow (`cd -` with no earlier cd, `cd "$DIR"`, `cd $(...)`) as if the shell were in the home, so `cd - && rm -rf .ssh` is blocked; `git rm -r` is checked like `rm -r`, from its `git -C` directory.
+- Drop setuid, setgid and sticky bits when a rewrite, or an uninstall restore with no recorded mode, keeps the existing mode of `settings.json` or `hooks.json`, as Router does; the read and write bits stay as they were.
+- Write Codex `config.toml` with mode 0600 on POSIX systems when `--judge-permissions` or uninstall changes it, not with the file's earlier mode, so it stays private.
+- Find leaked bytecode when Python writes it under a `pycache_prefix`, as macOS `/usr/bin/python3` does, instead of beside the source.
+- Inject project context once per session even where `chmod` is unavailable: the hook records its marker through the portability helper.
+- Name a missing installer file with `/` on Windows too (`missing installation requirement: hooks/context/...`), as the installer's other messages do.
+
+### Platforms
+
+- Lower the Python floor to 3.9 and keep Bash 3.2 working, so the stock macOS `/bin/bash` and `/usr/bin/python3` can install and run Harness; a test parses every shipped module with the 3.9 grammar and rejects `X | Y` annotations without `from __future__ import annotations`.
+- Start hooks and the statusline through `hooks/pyrun.sh`, a POSIX sh launcher shared with Router. It finds a real Python 3.9 or newer (`$HARNESS_PYTHON`, the cached interpreter, then `python3`, `python`, `py -3`; never the Windows Store stub) and sets UTF-8. The shell helpers search in the same order, and the project-context and auto-format Python now live in `.py` files beside their scripts.
+- Without a usable Python, hooks are no longer silent: helpers print one line on stderr and exit 1, the danger guard exits 2 (the command stays blocked), and the statusline shows the message. The installer stops with one missing-requirement line.
+- Run on native Windows through Git for Windows: Claude Code runs the hooks in Git Bash, and Codex hooks also get a PowerShell `command_windows` pinned to the installer's Python, which prints `harness: Python missing; rerun install.sh` when that Python is gone.
+- Install on native Windows (Git Bash): the installer takes the home from `HOME` (Windows Python's own lookup reads `USERPROFILE` only), writes quoted absolute `C:/` hook paths, skips `chmod` where NTFS has no mode bits, records manifest paths with `/` so Router and Harness agree on shared roles, and compares paths without case.
+- Run the hooks on native Windows Python: `hooks/checkpoint/compat.py` holds every POSIX-only call (read flags, owner check, modes, atomic replace, home lookup), so no hook imports `pwd` or needs `os.O_NOFOLLOW`, `os.O_NONBLOCK` or `os.geteuid`; a static test reads the Python syntax tree of every other shipped file to keep them out.
+- Keep the danger guard blocking on Windows: `/c/Users/x`, `C:\Users\x` and `C:/Users/x` are the same home, compared without case.
+- Read hook input as UTF-8 bytes, so a non-ASCII payload no longer depends on the Windows code page.
+- Keep a Windows checkout LF: `.gitattributes` makes every text file LF in a `core.autocrlf=true` clone, so `agents/SHARED.sha256` verifies there. `install.sh` stops on a CRLF copy before anything else runs, with one line naming the fix (`git rm -r --cached -q . && git reset --hard -q`, or re-download).
+- Read settings and manifests that start with a UTF-8 byte order mark, in the installer and `--status`; the installer still writes them LF without one.
+- Run the test suite on native Windows: `tests/_platform.py` (shared with Router) gives tests bash by full path, never the WSL `bash.exe`, POSIX paths for bash, a `python3` shim script instead of a symlinked interpreter, and a timeout that kills the whole process tree.
+- Tests find Python through `hooks/pyrun.sh` or the running interpreter, and checks that need POSIX modes, FIFOs, control-character file names or long paths print their reason and skip.
+- Limits on native Windows: POSIX owner checks and file modes such as 0600 are not enforced; file names with control characters and paths past the 260-character MAX_PATH are not supported; the danger guard reads POSIX shell syntax, not PowerShell. Support there starts at 0.3.1: upgrade both Router and Harness to 0.3.1 before uninstalling.
+
+### Changed
+
+- Settings register the danger guard as `sh "$HOME/.claude/harness/hooks/pyrun.sh" harness block guard/danger_cmd_guard.py`.
+- A script install sets the Claude statusline when none exists, without `--statusline`; the flag only replaces an existing one. An upgrade moves a statusline an older Harness wrote to the launcher form.
+- Run CI on ubuntu, macOS and Windows (Git Bash) at Python 3.9 and 3.13, with fail-fast off, so one failing job no longer cancels the rest.
+- Run every test file through `tests/run_all.py` in CI, from CONTRIBUTING.md and from the README: one line per file, a per-file timeout, the output of each failure and a final list of every failure; the same file ships in Router and Harness.
+- Build the 0.1 and 0.2 release trees from commit SHAs in both the test and together jobs, so `together` gets ROUTER_V01, ROUTER_V02, HARNESS_V01 and HARNESS_V02 too.
+- Pick the Router commit for the test job (shared-roles diff, Router comparisons) and the together job with `scripts/router-ref.sh resolve`: the ROUTER_REF repository variable when set, else the Router `v<VERSION>` tag, else Router main once its VERSION is the same or newer.
+- Fetch Router again every 20 seconds for up to 10 minutes while its release is still being pushed, so CI no longer goes red because Harness was pushed first; ROUTER_REPOSITORY overrides the repository.
+- CONTRIBUTING.md states the Python 3.9 floor, how to run the whole suite, and the release steps as a numbered list: both tools at the same version, mains pushed before tags, Router first.
+- Tests compare resolved temporary paths and pin restore budgets with fixed numbers, the checkpoint skill's Resume, checkpoint and hand off triggers, and the installer's output lines.
+- The README says the manual plugin statusline command runs a file that only the script install (`install.sh`) creates; a plugin-only install does not create it.
+- The README names each platform with its requirements and limits, what the guard still passes (`echo -e` escapes, printf octal escapes, here-strings built from printf, and values bound by `read`, `printf -v` or a for-loop variable), and that the remembered statusline window counts while it is 10 minutes old or less.
+
 ## 0.3.0
 
 Pairs with Router 0.3.0.

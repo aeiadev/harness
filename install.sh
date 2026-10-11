@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
+IFS= read -r crlf_probe 2>/dev/null < "$0"; case $crlf_probe in *$'\r') echo 'harness: CRLF line endings; run: git rm -r --cached -q . && git reset --hard -q (or re-download)' >&2; exit 1;; esac #
 set -euo pipefail
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 
-if ! command -v python3 >/dev/null 2>&1; then
-  printf '%s\n' 'harness: missing requirement: python3 (Python 3.10 or newer)' >&2
+# pyrun.sh finds Python 3.9+: python3, python, then py -3, never the Windows Store stub.
+here=${BASH_SOURCE[0]%/*}
+[[ $here != "${BASH_SOURCE[0]}" ]] || here=.
+if ! python=$("$BASH" "$here/hooks/pyrun.sh" --find harness 2>/dev/null); then
+  printf '%s\n' 'harness: missing requirement: python3 (Python 3.9 or newer)' >&2
   exit 1
 fi
 
 SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-exec python3 - "$SOURCE_DIR" "$@" <<'PY'
+exec "$python" -B - "$SOURCE_DIR" "$@" <<'PY'
 """Install the local distribution without third-party dependencies."""
 import argparse
 import ast
@@ -28,10 +33,14 @@ import sys
 import tempfile
 import subprocess
 
-if sys.version_info < (3, 10):
-    sys.exit("harness: missing requirement: python3 3.10 or newer")
+if sys.version_info < (3, 9):
+    sys.exit("harness: missing requirement: python3 3.9 or newer")
 
 source = Path(sys.argv.pop(1))
+sys.path.insert(0, str(source / "hooks/checkpoint"))
+import compat  # noqa: E402  compat.home(): $HOME first; Windows Python's Path.home() reads USERPROFILE only
+del sys.path[0]
+POSIX_MODES = os.name != "nt"  # NTFS keeps no mode bits: chmod there only sets or clears read-only
 parser = argparse.ArgumentParser(description="Install Harness roles, skills, and hooks.")
 parser.add_argument("--dry-run", action="store_true", help="show changes without writing files")
 parser.add_argument("--statusline", action="store_true", help="replace an existing statusLine")
@@ -53,7 +62,7 @@ except (OSError, UnicodeError) as error:
 if not package_version:
     sys.exit(f"harness: {version_path}: empty")
 host_homes = {
-    host: Path(os.environ.get(f"{host.upper()}_HOME") or str(Path.home() / f".{host}")).expanduser().absolute()
+    host: Path(os.environ.get(f"{host.upper()}_HOME") or str(compat.home() / f".{host}")).expanduser().absolute()
     for host in ("claude", "codex")
 }
 selected_hosts = (["claude", "codex"] if args.host == "both" else [args.host]) if args.host else [
@@ -72,11 +81,91 @@ def fail(message):
     raise ValueError(message)
 
 
+def set_mode(path, mode):
+    if POSIX_MODES:
+        os.chmod(path, mode)
+
+
+def writable(path):
+    """Windows refuses to replace or delete a read-only file, and older releases installed some 0444."""
+    if not POSIX_MODES:
+        with contextlib.suppress(OSError):
+            if not os.lstat(path).st_mode & stat.S_IWRITE:
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    return path
+
+
+def below(path, root):
+    """path lies strictly inside root; on Windows case and / versus \\ do not matter."""
+    path, root = os.path.normcase(str(path)), os.path.normcase(str(root))
+    return path != root and path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+WINDOWS = os.name == "nt"
+NO_PYTHON_EXIT = {"warn": 1, "block": 2, "status": 0}
+# PowerShell has no bash: Codex on Windows runs each wrapper's Python file (and its gate) directly.
+WINDOWS_PYTHON = {"context/inject-project-context.sh": ("context/inject_project_context.py", ""),
+                  "helpers/auto-format.sh": ("helpers/auto_format.py", "HARNESS_AUTO_FORMAT"),
+                  "helpers/verify-patch-landed-auto.sh": ("helpers/_verification.py post", ""),
+                  "helpers/stop-check-verify-patch.sh": ("helpers/_verification.py stop", "")}
+
+
+def hook_command(host, home, rel, mode, windows):
+    """Hook fields for harness/hooks/<rel> (a script beside pyrun.sh, then its arguments): "command" runs
+    a .py through pyrun.sh and a .sh wrapper through bash; Codex on Windows also gets a PowerShell
+    "command_windows" pinned to this installer's Python."""
+    script, *arguments = shlex.split(rel)
+    absolute = windows or home != (compat.home() / f".{host}").absolute() or " " in str(home)
+
+    def at(name):  # Windows and custom or spaced homes get quoted C:/ paths
+        return (shlex.quote((home / "harness/hooks" / name).as_posix()) if absolute
+                else f'"$HOME/.{host}/harness/hooks/{name}"')
+    words = ["bash", at(script)] if script.endswith(".sh") else ["sh", at("pyrun.sh"), "harness", mode,
+                                                                   shlex.quote(script)]
+    fields = {"command": " ".join(words + [shlex.quote(argument) for argument in arguments])}
+    if windows and host == "codex":
+        def quote(text):
+            return "'" + str(text).replace("'", "''") + "'"
+        target, gate = WINDOWS_PYTHON.get(script, (script, ""))
+        target, *extra = target.split()
+        words = [quote((home / "harness/hooks" / target).as_posix())] + [quote(item) for item in extra + arguments]
+        fields["command_windows"] = (
+            (f"if ($env:{gate} -ne '1') {{ exit 0 }}; " if gate else "") +
+            f"$env:PYTHONIOENCODING='utf-8'; $p={quote(Path(sys.executable).as_posix())}; if (Test-Path -LiteralPath $p) "
+            f"{{ & $p -B -X utf8 {' '.join(words)}; exit $LASTEXITCODE }}; "
+            "[Console]::Error.WriteLine('harness: Python missing; rerun install.sh'); "
+            f"exit {NO_PYTHON_EXIT[mode]}")
+    return fields
+
+
+def template_hook(command, host):
+    """(rel, mode) for a shipped template command, or None when it is not one of the two forms."""
+    words = shlex.split(command)
+    prefix = f"$HOME/.{host}/harness/hooks/"
+    if len(words) >= 5 and words[:3] == ["sh", prefix + "pyrun.sh", "harness"] and words[3] in NO_PYTHON_EXIT:
+        return " ".join(shlex.quote(word) for word in words[4:]), words[3]
+    if len(words) >= 2 and words[0] == "bash" and words[1].startswith(prefix) and words[1].endswith(".sh"):
+        return " ".join(shlex.quote(word) for word in [words[1][len(prefix):], *words[2:]]), "warn"
+    return None
+
+
+def installed_example(example, host, home):
+    """The template with every hook and the statusLine as hook_command() writes them for this home."""
+    def build(hook):
+        rel, mode = template_hook(hook["command"], host)
+        return {**hook, **hook_command(host, home, rel, mode, WINDOWS)}
+    built = {**example, "hooks": {event: [{**group, "hooks": [build(hook) for hook in group["hooks"]]}
+                                          for group in groups] for event, groups in example["hooks"].items()}}
+    if "statusLine" in example:
+        built["statusLine"] = build(example["statusLine"])
+    return built
+
+
 def read_json(path, fallback):
     if not path.exists():
         return copy.deepcopy(fallback)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, ValueError) as error:
         fail(f"{path}: {error}")
     if not isinstance(value, dict):
@@ -137,13 +226,24 @@ SHARED_ROLES = frozenset(
 )
 
 
+def slashed(manifest):
+    """Names a 0.1 or 0.2 install recorded on Windows (harness\\hooks\\x.py) read as harness/hooks/x.py."""
+    if isinstance(manifest, dict) and isinstance(manifest.get("files"), dict):
+        manifest["files"] = {name.replace("\\", "/") if isinstance(name, str) else name: item
+                             for name, item in manifest["files"].items()}
+    if isinstance(manifest, dict) and isinstance(manifest.get("created_dirs"), list):
+        manifest["created_dirs"] = [name.replace("\\", "/") if isinstance(name, str) else name
+                                    for name in manifest["created_dirs"]]
+    return manifest
+
+
 def router_manifest():
     """Return a valid Router manifest, or None when it is unsafe to trust."""
     sibling = home / "router" / "install-manifest.json"
     try:
         if sibling.is_symlink() or not sibling.is_file():
             return None
-        value = json.loads(sibling.read_text(encoding="utf-8"))
+        value = slashed(json.loads(sibling.read_text(encoding="utf-8-sig")))
         if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("files"), dict) or not isinstance(value.get("hooks"), list):
             return None
         for relative, fingerprint in value["files"].items():
@@ -193,8 +293,8 @@ def write_bytes(path, data, mode=0o600):
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
-        os.chmod(name, mode)
-        os.replace(name, path)
+        set_mode(name, mode)
+        os.replace(name, writable(path))
     finally:
         if os.path.exists(name):
             os.unlink(name)
@@ -226,7 +326,7 @@ def copy_original(data):
     fd, name = tempfile.mkstemp(prefix=f"{settings_path.name}.harness-backup-", dir=home)
     with os.fdopen(fd, "wb") as stream:
         stream.write(data)
-    os.chmod(name, 0o600)
+    set_mode(name, 0o600)
     print(f"Backed up original settings: {name}")
     return Path(name).name
 
@@ -317,9 +417,9 @@ def backup_file(path):
     if path.exists():
         fd, name = tempfile.mkstemp(prefix=f"{path.name}.harness-backup-", dir=home)
         os.close(fd)
-        os.chmod(name, 0o600)
+        set_mode(name, 0o600)
         shutil.copyfile(path, name)
-        os.chmod(name, 0o600)
+        set_mode(name, 0o600)
         print(f"Backup: {name}")
         return Path(name).name
     return None
@@ -380,7 +480,7 @@ def prune_dirs(relatives):
             resolved = target.resolve()
         except OSError:
             continue
-        if resolved == root or root not in resolved.parents:
+        if not below(resolved, root):
             print(f"Skipping directory outside the host home: {relative}")
             continue
         try:
@@ -411,16 +511,25 @@ def purge():
 
 
 def settings_mode():
-    """An existing settings file keeps its mode; a new one is private, as Router 0.3 writes it."""
+    """An existing settings file keeps its permission bits, without setuid, setgid or sticky; a new
+    one is private, as Router 0.3 writes it."""
     try:
-        return stat.S_IMODE(settings_path.stat().st_mode)
+        return stat.S_IMODE(settings_path.stat().st_mode) & 0o777
     except OSError:
         return 0o600
 
 
+def restore_mode(wanted_mode):
+    """A restored settings file gets its recorded mode; with none, the current file's permission
+    bits, without setuid, setgid or sticky; with no file, 0600."""
+    if wanted_mode is not None:
+        return wanted_mode
+    return stat.S_IMODE(settings_path.stat().st_mode) & 0o777 if settings_path.exists() else 0o600
+
+
 def folders_of(files):
     """Every folder below the host home that is a parent of a listed file."""
-    return list(dict.fromkeys(str(parent) for relative in files
+    return list(dict.fromkeys(parent.as_posix() for relative in files
                               for parent in Path(relative).parents if parent != Path(".")))
 
 
@@ -428,7 +537,7 @@ def save_config(path, updated, original):
     if updated != original:
         backup_file(path)
         if updated is None:
-            path.unlink()
+            writable(path).unlink()
         else:
             write_bytes(path, updated)
 
@@ -470,17 +579,20 @@ def validate_settings(settings):
 
 
 def references_runtime(settings):
-    commands = [hook.get("command") for groups in settings.get("hooks", {}).values() for group in groups for hook in group["hooks"]]
+    commands = [hook.get(field) for groups in settings.get("hooks", {}).values() for group in groups
+                for hook in group["hooks"] for field in ("command", "command_windows")]
     if isinstance(settings.get("statusLine"), dict):
-        commands.append(settings["statusLine"].get("command"))
+        commands.extend(settings["statusLine"].get(field) for field in ("command", "command_windows"))
     prefixes = (
-        str(home / "harness") + "/",
+        (home / "harness").as_posix() + "/",
         f"$HOME/.{host}/harness/",
         f"${{HOME}}/.{host}/harness/",
         f"~/.{host}/harness/",
         f"${host.upper()}_HOME/harness/",
         "${" + host.upper() + "_HOME}/harness/",
     )
+    if os.name == "nt":
+        prefixes = tuple(prefix.casefold() for prefix in prefixes)
     for command in commands:
         if not isinstance(command, str):
             continue
@@ -488,6 +600,11 @@ def references_runtime(settings):
             words = shlex.split(command)
         except ValueError:
             words = [command]
+        # PowerShell quotes an apostrophe by doubling it; shlex understands Bash quotes only.
+        words.append(command.replace("''", "'"))
+        words = [word.replace("\\", "/") for word in words]
+        if os.name == "nt":
+            words = [word.casefold() for word in words]
         if any(prefix in word for word in words for prefix in prefixes):
             return True
     return False
@@ -515,7 +632,7 @@ def status_json(path):
             plain = OSError()
             plain.strerror, plain.filename = "not a regular file", str(path)
             return None, "unreadable", plain
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
         return value, None, None
     except FileNotFoundError:
         return None, "missing", None
@@ -543,13 +660,13 @@ def unreadable_reason(error, base=None):
                     path = parent
                     break
         root = (base if base is not None and base in path.parents else home if path == home or home in path.parents
-                else Path.home() if path == Path.home() or Path.home() in path.parents else None)
+                else compat.home() if path == compat.home() or compat.home() in path.parents else None)
         relative = path.relative_to(root) if root is not None else path
         try:
             suffix = "/" if stat.S_ISDIR(os.lstat(path).st_mode) else ""
         except OSError:
             suffix = ""
-        return f"{clean(relative)}{suffix} not readable: {reason}"
+        return f"{clean(relative.as_posix() if root is not None else str(path))}{suffix} not readable: {reason}"
     except (TypeError, ValueError, OSError):
         return "install manifest unreadable"
 
@@ -567,7 +684,7 @@ def status_payload():
             if folder == "agents" and relative == Path("SHARED.sha256"):
                 continue
             if path.is_file():
-                payload[str(Path(destination) / relative)] = digest(path.read_bytes())
+                payload[(Path(destination) / relative).as_posix()] = digest(path.read_bytes())
     return payload
 
 
@@ -608,7 +725,7 @@ def status_last_hook_write():
         if newest is None:
             return "last hook write: none yet"
         stamp = datetime.fromtimestamp(newest[0] / 1e9, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        return f"last hook write: {stamp} ({clean(newest[1].relative_to(cache))})"
+        return f"last hook write: {stamp} ({clean(newest[1].relative_to(cache).as_posix())})"
     except (OSError, ValueError) as error:
         return f"last hook write: unknown ({unreadable_reason(error, cache)})"
 
@@ -622,7 +739,7 @@ def status_budget():
         ceilings = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                         and any(isinstance(target, ast.Name) and target.id == "CEILINGS" for target in node.targets))
         timeout = float(os.environ.get("HARNESS_STATUS_BUDGET_TIMEOUT", "10"))
-        result = subprocess.run([sys.executable, str(script), "--home", str(home), "--host", host, "--json"],
+        result = subprocess.run([sys.executable, "-B", str(script), "--home", str(home), "--host", host, "--json"],
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
         data = json.loads(result.stdout)
         entry = data["trees"][0]
@@ -650,7 +767,7 @@ def status_plugins():
         settings_problem = unreadable_reason(error)
     else:
         try:
-            value = json.loads(settings_path.read_bytes().decode("utf-8"))
+            value = json.loads(settings_path.read_bytes().decode("utf-8-sig"))
             if not isinstance(value, dict):
                 settings_problem = f"{clean(settings_path)} is not a JSON object"
             else:
@@ -731,6 +848,7 @@ def status_plugins():
 def status():
     print(f"Harness status ({host}): {clean(home)}")
     manifest, problem, manifest_error = status_json(manifest_path)
+    manifest = slashed(manifest)
     if problem is None:
         try:
             validate_manifest(manifest, manifest_path)
@@ -831,6 +949,10 @@ def status():
     print(f"skew: shared roles come from Router {sibling_version}; upgrade it for the 0.3 roles" if skew else "skew: none")
     template = source / ("examples/settings.example.json" if host == "claude" else "codex/hooks.json")
     example, _, _ = status_json(template)
+    try:
+        example = installed_example(example, host, home)
+    except (TypeError, ValueError, KeyError, AttributeError):
+        pass  # the comparison below reports an unusable template as it always has
     settings, settings_problem, _ = status_json(settings_path)
     if settings_problem and settings_problem != "missing":
         reason = {"unreadable": "not readable", "not valid JSON": "not valid JSON",
@@ -875,7 +997,8 @@ def main():
     validate_settings(original)
     original_bytes = settings_path.read_bytes() if settings_path.is_file() else None
     settings = copy.deepcopy(original)
-    manifest = read_json(manifest_path, {})
+    on_disk = read_json(manifest_path, {})
+    manifest = slashed(copy.deepcopy(on_disk))
     if manifest_path.exists():
         validate_manifest(manifest, manifest_path)
     # Only a first install may treat the settings file on disk as the user's original.
@@ -944,7 +1067,10 @@ def main():
                 linked.append(relative)
                 continue
             target = safe_path(relative)
-            if keep_runtime and relative.startswith(("harness/hooks/", "harness/statusline/")):
+            runtime_relative = relative.replace("\\", "/")
+            if os.name == "nt":
+                runtime_relative = runtime_relative.casefold()
+            if keep_runtime and runtime_relative.startswith(("harness/hooks/", "harness/statusline/")):
                 # Keep the full runtime because scripts import companion modules.
                 continue
             if relative in SHARED_ROLES and (router_files is None or relative in router_files):
@@ -1001,10 +1127,7 @@ def main():
                 print(f"Would leave in place under a symbolic link: {relative}")
             return
         if settings_action == "restore":
-            mode = wanted_mode
-            if mode is None:
-                mode = stat.S_IMODE(settings_path.stat().st_mode) if settings_path.exists() else 0o600
-            write_bytes(settings_path, data, mode)
+            write_bytes(settings_path, data, restore_mode(wanted_mode))
         elif settings_action == "remove":
             settings_path.unlink()
         else:
@@ -1014,7 +1137,7 @@ def main():
             manifest.pop("judge_permissions", None)
             write_bytes(manifest_path, encoded(manifest))
         for path in removable:
-            path.unlink()
+            writable(path).unlink()
         runtime = home / "harness"
         if runtime.is_dir() and not runtime.is_symlink():
             for root, dirs, names in os.walk(runtime, followlinks=False):
@@ -1034,7 +1157,7 @@ def main():
             directories = manifest["created_dirs"]
         else:
             # Upgraded from 0.1 or 0.2: prune only the directories Harness installs into.
-            directories = {"harness"} | {str(parent) for relative in previous_files
+            directories = {"harness"} | {parent.as_posix() for relative in previous_files
                                          for parent in Path(relative).parents if parent != Path(".")}
         prune_dirs(directories)
         for relative in linked:
@@ -1048,41 +1171,28 @@ def main():
     template = Path("examples/settings.example.json" if host == "claude" else "codex/hooks.json")
     example = read_json(source / template, {})
     if not example.get("hooks") or (host == "claude" and "statusLine" not in example):
-        fail(f"missing installation requirement: {template}")
+        fail(f"missing installation requirement: {template.as_posix()}")
     validate_settings(example)
     commands = [hook["command"] for groups in example["hooks"].values() for group in groups for hook in group["hooks"]]
     if host == "claude":
         commands.append(example["statusLine"]["command"])
-    prefix = f"$HOME/.{host}/harness/"
     for command in commands:
-        words = shlex.split(command)
-        if len(words) < 2 or words[0] not in ("bash", "python3") or not words[1].startswith(prefix):
-            fail(f"invalid hook or statusLine command in {template}")
-        relative = Path(words[1][len(prefix):])
+        parsed = template_hook(command, host)
+        if parsed is None:
+            fail(f"invalid hook or statusLine command in {template.as_posix()}")
+        relative = Path(os.path.normpath(os.path.join("hooks", shlex.split(parsed[0])[0])))
         if relative.is_absolute() or ".." in relative.parts or not (source / relative).is_file():
-            fail(f"missing installation requirement: {relative}")
+            fail(f"missing installation requirement: {relative.as_posix()}")
     # Fail before installation if the checkpoint runtime or its user guidance is incomplete.
     required_checkpoint_files = (
-        "hooks/checkpoint/storage.py", "hooks/checkpoint/journal.py",
+        "hooks/checkpoint/storage.py", "hooks/checkpoint/compat.py", "hooks/checkpoint/journal.py",
         "hooks/checkpoint/policy.json", "hooks/checkpoint/outline.md",
         "hooks/checkpoint/guide.md", "skills/checkpoint/SKILL.md",
     )
     for relative in required_checkpoint_files:
         if not (source / relative).is_file():
             fail(f"missing installation requirement: {relative}")
-    default_home = (Path.home() / f".{host}").absolute()
-    if home != default_home:
-        def replace_paths(value):
-            if isinstance(value, dict):
-                return {key: replace_paths(item) for key, item in value.items()}
-            if isinstance(value, list):
-                return [replace_paths(item) for item in value]
-            if isinstance(value, str) and '"' + prefix in value:
-                before, rest = value.split('"' + prefix, 1)
-                relative, after = rest.split('"', 1)
-                return before + shlex.quote(str(home / "harness" / relative)) + after
-            return value
-        example = replace_paths(example)
+    example = installed_example(example, host, home)
 
     payload = {}
     agent_source = "agents" if host == "claude" else "codex/agents"
@@ -1099,7 +1209,7 @@ def main():
             if path.is_symlink():
                 fail(f"distribution contains a symbolic link: {folder}/{relative}")
             if path.is_file():
-                payload[str(Path(destination) / relative)] = (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                payload[(Path(destination) / relative).as_posix()] = (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
 
     files = dict(previous_files)
     writes = []
@@ -1160,6 +1270,21 @@ def main():
 
     merged_hooks = settings.setdefault("hooks", {})
     next_hooks = copy.deepcopy(owned_hooks)
+    # Retire unchanged registrations that this installer owns before adding their replacements.
+    # Full hook and group equality leaves edited commands, metadata and unrelated hooks intact.
+    for event, groups in owned_hooks.items():
+        for group in groups:
+            retired_hooks = [hook for hook in group["hooks"] if not any(
+                group_metadata(group) == group_metadata(wanted) and hook in wanted["hooks"]
+                for wanted in example["hooks"].get(event, []))]
+            if retired_hooks:
+                retired_group = {**group, "hooks": retired_hooks}
+                remove_owned(merged_hooks.get(event, []), [retired_group])
+                remove_owned(next_hooks[event], [retired_group])
+        if not next_hooks[event]:
+            next_hooks.pop(event)
+        if not merged_hooks.get(event) and event not in example["hooks"] and event not in existing_empty_events:
+            merged_hooks.pop(event, None)
     for event, groups in example["hooks"].items():
         current = merged_hooks.setdefault(event, [])
         for group in groups:
@@ -1168,7 +1293,7 @@ def main():
                 added = {**copy.deepcopy(group), "hooks": copy.deepcopy(missing)}
                 current.append(added)
                 next_hooks.setdefault(event, []).append(copy.deepcopy(added))
-    line = manifest.get("statusline")
+    line = copy.deepcopy(manifest.get("statusline"))
     if host == "claude":
         wanted_line = example["statusLine"]
         if "statusLine" not in settings or args.statusline:
@@ -1178,6 +1303,10 @@ def main():
                 else:
                     line["installed"] = wanted_line
                 settings["statusLine"] = wanted_line
+        elif settings["statusLine"] != wanted_line and line and settings["statusLine"] == line["installed"]:
+            # Only migrate an unchanged line this manifest owns; retain its previous value.
+            line["installed"] = wanted_line
+            settings["statusLine"] = wanted_line
         elif settings["statusLine"] != wanted_line:
             print("Keeping existing statusLine. Use --statusline to replace it.")
     facts = sibling or {}
@@ -1233,11 +1362,11 @@ def main():
     for target in [path for path, _, _ in writes] + [settings_path, manifest_path]:
         parts = target.relative_to(home).parts
         for depth in range(1, len(parts)):
-            relative = str(Path(*parts[:depth]))
+            relative = Path(*parts[:depth]).as_posix()
             if not (home / relative).exists() and relative not in created_dirs:
                 created_dirs.append(relative)
     # A folder Router created that holds a path Harness writes goes when the last tool leaves.
-    held = {str(parent) for relative in [*payload, settings_path.name, "harness/install-manifest.json"]
+    held = {parent.as_posix() for relative in [*payload, settings_path.name, "harness/install-manifest.json"]
             for parent in Path(relative).parents if parent != Path(".")}
     if "created_dirs" not in facts:  # The sibling is a 0.1 or 0.2 install, or absent.
         theirs = folders_of(facts.get("files", {}))
@@ -1263,14 +1392,14 @@ def main():
     for path, data, mode in writes:
         write_bytes(path, data, mode)
     for path, mode in chmods:
-        os.chmod(path, mode)
+        set_mode(path, mode)
     for path, relative in retired:
-        path.unlink()
+        writable(path).unlink()
         print(f"Removed no-longer-shipped: {relative}")
     if new_settings is not None:
         write_bytes(settings_path, new_settings, settings_mode())
     save_config(config_path, config_updated, config_original)
-    if next_manifest != manifest:
+    if next_manifest != on_disk:  # also rewrites names recorded with backslashes
         write_bytes(manifest_path, encoded(next_manifest))
     if host == "codex":
         print("Harness installed for Codex. Trust new or changed hooks in Codex (/hooks) before they run.")

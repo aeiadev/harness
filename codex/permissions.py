@@ -1,7 +1,7 @@
 """Plan a reversible, text-preserving merge of the optional judge profile.
 
 Only the public inserted block is recorded as ownership metadata. Existing config
-contents never enter that metadata. Python 3.10 conservatively declines multiline
+contents never enter that metadata. Python 3.9 and 3.10 conservatively decline multiline
 TOML strings and values; Python 3.11 and later use the standard TOML parser.
 """
 
@@ -11,7 +11,7 @@ import re
 
 try:
     import tomllib
-except ImportError:  # Python 3.10 has no standard TOML parser.
+except ImportError:  # Python 3.9 and 3.10 have no standard TOML parser.
     tomllib = None
 
 

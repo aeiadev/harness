@@ -14,6 +14,11 @@ import unittest
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
+if os.name == "nt":  # Fixtures are LF UTF-8 on every platform, so byte counts match (no \r\n from write_text).
+    Path.write_text = lambda self, data, encoding=None, errors=None, newline=None: self.write_bytes(
+        data.encode(encoding or "utf-8", errors or "strict"))
+    Path.read_text = lambda self, encoding=None, errors=None: self.read_bytes().decode(
+        encoding or "utf-8", errors or "strict")
 BUDGET = ROOT / "scripts/budget.py"
 IS_ROUTER = (ROOT / "bin/router").is_file()
 LABEL = "router" if IS_ROUTER else "harness"
@@ -227,7 +232,8 @@ class Trims(unittest.TestCase):
                 self.assertRegex(description, r"\b(Use|Load)\b")
 
     TRIGGERS = {
-        "project-handoff": ("continue a project", "prepare a handoff", "switch sessions", "durable", "milestone"),
+        "project-handoff": ("Resume", "checkpoint", "hand off", "continue a project", "prepare a handoff",
+                            "switch sessions", "durable", "milestone"),
         "skill-index": ("resume", "verify", "test", "plan", "delegate", "document"),
         "tdd": ("failing test", "observable acceptance criteria", "reproducible failure"),
         "verify-patch-landed": ("scripted edit", "codemod", "patch helper", "multi-file rewrite", "indirect edit"),

@@ -12,6 +12,11 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+if os.name == "nt":  # Fixtures are LF UTF-8 on every platform, as a Linux or macOS checkout writes them.
+    Path.write_text = lambda self, data, encoding=None, errors=None, newline=None: self.write_bytes(
+        data.encode(encoding or "utf-8", errors or "strict"))
+    Path.read_text = lambda self, encoding=None, errors=None: self.read_bytes().decode(
+        encoding or "utf-8", errors or "strict")
 
 
 class RestoreContract(unittest.TestCase):
@@ -33,7 +38,8 @@ class RestoreContract(unittest.TestCase):
         self.project.mkdir(parents=True)
         (self.project / ".git").mkdir()
         self.document = self.project / "STATE.md"
-        self.environment["XDG_STATE_HOME"] = str(self.base / name / "state")
+        # State sits outside the long name so its deeper paths stay under Windows' 260 characters.
+        self.environment["XDG_STATE_HOME"] = str(self.base / f"state-{name[:8]}{len(name)}")
 
     def policy(self, **values):
         directory = self.project / ".claude"
@@ -45,7 +51,7 @@ class RestoreContract(unittest.TestCase):
                    "source": source, **fields}
         result = subprocess.run([sys.executable, str(ROOT / "hooks/checkpoint/dispatch.py"),
                                  "restore", "--host=" + host], input=json.dumps(payload),
-                                text=True, capture_output=True, cwd=self.project,
+                                text=True, encoding="utf-8", capture_output=True, cwd=self.project,
                                 env=environment or self.environment, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
@@ -78,10 +84,13 @@ class RestoreContract(unittest.TestCase):
     def notice(self, cap=1000):
         return f"\n[Excerpt only. Read the complete checkpoint at {self.shown_path(cap)}.]\n"
 
-    def share(self, headers, sections, cap=1000):
-        """Equal content share per section, computed from the inputs alone."""
-        fixed = len((self.lead(cap) + self.notice(cap) + headers).encode()) + 2 * (sections - 1)
-        return (cap - fixed) // sections
+    def wide(self):
+        """Move the document to a path past the 166-byte cut (1000 // 6), whatever TMPDIR is, so the
+        layout has fixed widths: a 261-byte lead and a 217-byte notice leave 522 bytes for sections.
+        About 190 bytes long, under Windows' 260-character path limit."""
+        self.relocate("d" * max(1, 190 - len(os.fsencode(self.base / "project/STATE.md"))))
+        self.assertEqual(len(self.shown_path(1000).encode()), 166, self.document)
+        self.assertEqual((len(self.lead(1000).encode()), len(self.notice(1000).encode())), (261, 217))
 
     def proof(self, text, restore_bytes=1000):
         self.policy(restore_bytes=restore_bytes)
@@ -98,21 +107,23 @@ class RestoreContract(unittest.TestCase):
         self.assertNotIn("HEAD-OF-PROOF", text)
 
     def test_oversized_newest_line_with_trailing_blank_lines_keeps_its_tail(self):
+        self.wide()
         line = "a" * 2990 + "END"
         for blanks in ("\n", "\n\n\n", "  \n\t\n\n"):
             with self.subTest(blanks=blanks):
                 text = self.proof("## Proof\n" + line + "\n" + blanks + "## Objective\nO\n")
-                share = self.share("## Objective\n## Proof\n", 2)
-                kept = "a" * (share - 4) + "END\n"
+                # 522 less 22 header bytes and one 2-byte separator: 249 a section, so the line's
+                # last 248 bytes and a newline that the join drops.
                 self.assertEqual(text, self.lead(1000) + "## Objective\nO\n\n## Proof\n" +
-                                 kept.rstrip("\n") + self.notice())
+                                 "a" * 245 + "END" + self.notice())
 
     def test_crlf_oversized_newest_line_leaves_no_carriage_return(self):
+        self.wide()
         self.policy(restore_bytes=1000)
         self.document.write_bytes(b"## Proof\r\n" + b"a" * 2990 + b"END\r\n\r\n")
         text = self.restore()
-        kept = "a" * (self.share("## Proof\r\n", 1) - 4) + "END"
-        self.assertEqual(text, self.lead(1000) + "## Proof\r\n" + kept + self.notice())
+        # 522 less the 10-byte header: 512, so the line's last 511 bytes and a newline.
+        self.assertEqual(text, self.lead(1000) + "## Proof\r\n" + "a" * 508 + "END" + self.notice())
 
     def test_oversized_multibyte_line_stays_valid(self):
         text = self.proof("## Proof\n" + "界" * 2000 + "\n")
@@ -140,20 +151,40 @@ class RestoreContract(unittest.TestCase):
         self.assertEqual(self.restore(), self.lead() + "# Title\n\n## Next move\nB\n\n## Objective\nA\n")
 
     def test_excerpt_layout_is_exact(self):
+        self.wide()
+        self.policy(restore_bytes=1000)
+        self.document.write_text("# Title\n## Next move\nB\n## Proof\n" +
+                                 "".join(f"proof {n:03d}\n" for n in range(200)))
+        text = self.restore()
+        # 522 less 22 header bytes and two 2-byte separators: 165 a section, so the newest
+        # sixteen 10-byte proof lines.
+        kept = "\n".join(f"proof {n:03d}" for n in range(184, 200))
+        self.assertEqual(text, self.lead(1000) + "# Title\n\n## Next move\nB\n\n## Proof\n" + kept + self.notice())
+        self.assertLessEqual(len(text.encode()), 1000)
+
+    def test_excerpt_keeps_the_newest_lines_at_any_path_length(self):
         lines = "".join(f"proof {n:03d}\n" for n in range(200))
-        # Document paths from short to past the 166-byte cut, whatever TMPDIR is.
-        for name in ("short", "d" * 40, "d" * 120, "d" * 200):
+        # Document paths from short to past the 166-byte cut, whatever TMPDIR is; the longest
+        # is sized from TMPDIR to about 190 bytes, under Windows' 260-character path limit.
+        longest = max(1, 190 - len(os.fsencode(self.base / "project/STATE.md")))
+        counts = []
+        for name in sorted(("short", "d" * 40, "d" * 120, "d" * longest), key=len):
             with self.subTest(name_bytes=len(name)):
                 self.relocate(name)
                 self.policy(restore_bytes=1000)
                 self.document.write_text("# Title\n## Next move\nB\n## Proof\n" + lines)
                 text = self.restore()
-                count = self.share("## Next move\n## Proof\n", 3) // len("proof 000\n")
-                self.assertTrue(0 < count < 200, count)
-                kept = "".join(f"proof {n:03d}\n" for n in range(200 - count, 200))
-                self.assertEqual(text, self.lead(1000) + "# Title\n\n## Next move\nB\n\n## Proof\n" +
-                                 kept.rstrip("\n") + self.notice())
+                head = self.lead(1000) + "# Title\n\n## Next move\nB\n\n## Proof\n"
+                self.assertTrue(text.startswith(head), text[:200])
+                self.assertTrue(text.endswith(self.notice()), text[-200:])
+                rows = text[len(head):-len(self.notice())].split("\n")
+                self.assertTrue(0 < len(rows) < 200, len(rows))
+                self.assertEqual(rows, [f"proof {n:03d}" for n in range(200 - len(rows), 200)])
                 self.assertLessEqual(len(text.encode()), 1000)
+                if len(self.shown_path(1000).encode()) == 166:
+                    self.assertEqual(len(rows), 16)  # The fixed widths of test_excerpt_layout_is_exact.
+                counts.append(len(rows))
+        self.assertEqual(counts, sorted(counts, reverse=True), "a longer path never leaves more room")
 
     def test_oversized_preamble_keeps_its_first_lines(self):
         text = self.proof("# Title line\n" + "preamble filler\n" * 300 + "PREAMBLE-LAST\n" +
@@ -198,7 +229,9 @@ class RestoreContract(unittest.TestCase):
         (self.project / "tracked").write_text("first")
         self.git("add", "tracked")
         self.git("commit", "--quiet", "-m", "fixture")
-        self.git("checkout", "--quiet", "-b", "b" * 150 + "/" + "c" * 150)
+        # Git keeps each branch as a file under .git/logs/refs/heads; Windows stops paths at 260.
+        half = min(150, (250 - len(str(self.project / ".git/logs/refs/heads"))) // 2)
+        self.git("checkout", "--quiet", "-b", "b" * half + "/" + "c" * half)
         (self.project / "tracked").write_text("changed")
         self.document.write_text("## Next move\nRun checks\n")
         os.utime(self.document, (time.time() - 3 * 3600, time.time() - 3 * 3600))

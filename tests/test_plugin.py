@@ -12,11 +12,13 @@ import subprocess
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, posix, skip_unless_posix_modes  # noqa: E402
 VERSION = (ROOT / "VERSION").read_text().strip()
 SKIP_ROUTER = "Router checkout not found (set ROUTER_DIR)"
 GUARD = re.compile(r'\[ -e "\$\{CLAUDE_HOME:-\$HOME/\.claude\}/harness/install-manifest\.json" \] \|\| '
-                   r'(bash|python3) "\$\{CLAUDE_PLUGIN_ROOT\}/hooks/([\w/-]+\.(?:sh|py))"(.*)')
-SCRIPT = re.compile(r'(bash|python3) "\$HOME/\.claude/harness/hooks/([\w/-]+\.(?:sh|py))"(.*)')
+                   r'(bash|sh) "\$\{CLAUDE_PLUGIN_ROOT\}/hooks/([\w/-]+\.(?:sh|py))"(.*)')
+SCRIPT = re.compile(r'(bash|sh) "\$HOME/\.claude/harness/hooks/([\w/-]+\.(?:sh|py))"(.*)')
 
 
 def router_dir():
@@ -195,6 +197,9 @@ class Generated(Scratch):
         for path in (ROOT / "hooks/guard").iterdir():
             if path.is_file():
                 shutil.copy2(path, script / path.name)
+        (script.parent / "checkpoint").mkdir()  # the guard loads ../checkpoint/compat.py
+        shutil.copy2(ROOT / "hooks/checkpoint/compat.py", script.parent / "checkpoint/compat.py")
+        shutil.copy2(ROOT / "hooks/pyrun.sh", script.parent / "pyrun.sh")  # the wrapper runs it
         original = invoke(f'bash "{script / "danger-cmd-guard.sh"}"', danger, "script")
         result = invoke(guard, danger, "plugin")
         self.assertEqual((result.returncode, result.stdout, result.stderr),
@@ -224,7 +229,7 @@ class Generated(Scratch):
 class Status(Scratch):
     def lines(self):
         before = tree_hash(self.base)
-        result = subprocess.run(["bash", str(ROOT / "install.sh"), "--status", "--host", "claude"], env=self.env,
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--status", "--host", "claude"], env=self.env,
                                 capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
         self.assertEqual((result.returncode, result.stderr), (0, ""), result.stdout)
         self.assertEqual(tree_hash(self.base), before)
@@ -270,7 +275,10 @@ class Status(Scratch):
                                                 "plugin: shared-roles enabled unknown, not cached"])
         settings.unlink()
         settings.mkdir()
-        self.assertEqual(self.lines(), ["plugin: settings.json/ not readable: Is a directory",
+        with self.assertRaises(OSError) as denied:
+            open(settings, "rb").close()
+        reason = denied.exception.strerror  # Windows: Permission denied
+        self.assertEqual(self.lines(), [f"plugin: settings.json/ not readable: {reason}",
                                         "plugin: harness enabled unknown, not cached",
                                         "plugin: shared-roles enabled unknown, not cached"])
 
@@ -279,12 +287,17 @@ class Status(Scratch):
         cache = self.claude / "plugins/cache/harness"
         cache.parent.mkdir(parents=True)
         cache.write_text("not a directory")
-        self.assertEqual(self.lines(), ["plugin: plugins/cache/harness not readable: Not a directory",
+        with self.assertRaises(OSError) as denied:
+            os.listdir(cache)
+        reason = denied.exception.strerror  # Windows words it its own way
+        self.assertEqual(self.lines(), [f"plugin: plugins/cache/harness not readable: {reason}",
                                         "plugin: harness not enabled, cached unknown",
                                         "plugin: shared-roles not enabled, cached unknown"])
 
+    @skip_unless_posix_modes("mode 0o100 and 0o400 cache folders")
     def test_cache_directory_missing_read_or_search_names_os_error(self):
         if os.geteuid() == 0:
+            print(f"SKIP {self.id()}: root can traverse mode-restricted directories", file=sys.stderr, flush=True)
             self.skipTest("root can traverse mode-restricted directories")
         cache = self.claude / "plugins/cache/harness"
         cache.mkdir(parents=True)
@@ -303,7 +316,7 @@ class Status(Scratch):
                         reason = error.strerror
                     else:
                         self.fail("the OS did not deny the requested operation")
-                    result = subprocess.run(["bash", str(ROOT / "install.sh"), "--status", "--host", "claude"],
+                    result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--status", "--host", "claude"],
                                             env=self.env, capture_output=True, text=True,
                                             stdin=subprocess.DEVNULL, timeout=60)
                     self.assertEqual((result.returncode, result.stderr), (0, ""))

@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" restore --host=claude",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py restore --host=claude",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" restore --host=claude",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py restore --host=claude",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || bash \"${CLAUDE_PLUGIN_ROOT}/hooks/guard/danger-cmd-guard.sh\"",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/pyrun.sh\" harness block guard/danger_cmd_guard.py",
             "timeout": 10
           }
         ]
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" check --host=claude",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py check --host=claude",
             "timeout": 10
           }
         ]
@@ -91,7 +91,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" archive --host=claude",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py archive --host=claude",
             "timeout": 10
           }
         ]
@@ -113,7 +113,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint/dispatch.py\" snapshot --host=claude",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/harness/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py snapshot --host=claude",
             "timeout": 10
           }
         ]

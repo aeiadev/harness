@@ -298,6 +298,27 @@ def executed_string(words):
     return None
 
 
+def assignments(words):
+    """Yield NAME, value for each assignment a simple command makes: before its name, after
+    env, or as an argument of export, declare, local, readonly or typeset."""
+    words = list(words)
+    while words:
+        match = re.fullmatch(r"([A-Za-z_]\w*)=(.*)", words[0], re.S)
+        command = words.pop(0).rsplit("/", 1)[-1]
+        if match:
+            yield match[1], match[2]
+        elif command in {"env", "export", "declare", "local", "readonly", "typeset"}:
+            while words and words[0].startswith("-"):
+                words.pop(0)
+        elif command not in {"then", "do", "else", "if", "elif", "!"}:
+            return
+
+
+def references(text, name):
+    """True when text expands the variable name, as $name or ${name...}."""
+    return re.search(r"\$\{?" + re.escape(name) + r"(?!\w)", text) is not None
+
+
 def literal_echoed_code(argument):
     """Recognize one substitution whose echo/printf output becomes shell code."""
     if argument.startswith("$(") and argument.endswith(")"):

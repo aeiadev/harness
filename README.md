@@ -30,8 +30,28 @@ main session chooses roles itself.
 
 ## Install
 
-Use Bash, Python 3.10 or newer, and Git for project discovery and worktree roles. The tests also need
-the `timeout` command. Hook scripts use Python's standard library and run locally.
+Use Bash, Python 3.9 or newer, and Git for project discovery and worktree roles.
+Hook scripts use Python's standard library and run locally.
+
+| Platform | Requirements | Claude Code | Codex |
+| --- | --- | --- | --- |
+| Linux | Bash 3.2 or newer, Python 3.9 or newer, Git. | Script install; hooks start through `sh` and `bash`. | Script install; hooks start through `sh` and `bash`. |
+| Stock macOS | The system `/bin/bash` 3.2 and `/usr/bin/python3` 3.9 are enough, with Git. | As on Linux. | As on Linux. |
+| Native Windows | Git for Windows and Python 3.9 or newer; run `install.sh` in Git Bash. | Claude Code runs the hooks in Git Bash. | Codex runs the hooks in PowerShell through `command_windows`, with the Python that ran the installer. |
+| WSL | The Linux requirements, inside WSL. | As on Linux, installed inside WSL. | As on Linux, installed inside WSL. |
+
+The installer and every hook find Python through `hooks/pyrun.sh`: `HARNESS_PYTHON`
+when set, then the interpreter recorded in the Harness state folder, then `python3`,
+`python` and `py -3`. Only Python 3.9 or newer counts, and the Microsoft Store
+`python3` stub is skipped. Hooks record the interpreter they find once that state
+folder exists; `--dry-run` and `--status` write nothing. Without a usable Python,
+the installer stops with `harness: missing requirement: python3 (Python 3.9 or newer)`.
+A hook prints `harness: no Python 3.9 or newer found (python3, python, py -3); install one or set HARNESS_PYTHON`
+on stderr and exits 1, the danger guard exits 2 so the command stays blocked, and
+the statusline shows the same line. On native Windows, Harness takes the home from
+`HOME` before Windows Python's `USERPROFILE` lookup, so Git Bash, the hosts and
+Harness agree on it. Limits for each platform follow the installation steps.
+
 Download or clone a reviewed release, then run from its directory:
 
 ```bash
@@ -66,9 +86,11 @@ The user settings form is `{"enabledPlugins": {"harness@harness": true}}`.
 A script install wins over the plugin: plugin hooks stand down while its install
 manifest exists. A plugin cannot set the main statusline. With a script install, `bash install.sh --statusline` sets it.
 With a plugin install, add this command as the `statusLine.command` in Claude settings by hand: `python3 "$HOME/.claude/harness/statusline/statusline.py"`.
+That file comes from the script install (`install.sh`); a plugin-only install does
+not create it, so this command needs the script install too.
 
-The live statusline is Claude-only. An existing `statusLine` is kept unless you
-explicitly select Harness:
+The live statusline is Claude-only. A script install sets it when no `statusLine`
+exists. An existing `statusLine` is kept unless you explicitly select Harness:
 
 ```bash
 bash install.sh --statusline
@@ -123,6 +145,19 @@ After both tools reach 0.3.0, shared roles move to the new bytes; the first
 tool's next run quietly updates its own record. Uninstall restores the original
 settings bytes and mode without group or other write when the recorded original
 is available.
+
+### Platform limits
+
+Router 0.3.1 pairs with Harness 0.3.1. Native Windows support starts at 0.3.1.
+
+- On native Windows, POSIX owner checks and file modes such as 0600 and 0700 are not enforced; use Windows account and folder permissions to control access. The file modes named elsewhere in this README apply to POSIX systems.
+- Harness installs regular files and creates no symbolic links, so it needs no symlink permission. Where symlinks are not allowed, Router installs copies instead, and its upgrade and uninstall handle those copies.
+- Codex on native Windows runs the hooks through PowerShell with the Python that ran the installer. If that Python is moved or removed, a hook prints `harness: Python missing; rerun install.sh`; run `install.sh` again.
+- The danger guard reads POSIX shell syntax; it does not inspect PowerShell commands.
+- The Microsoft Store `python3` stub is never used; with no other Python 3.9 or newer, the missing-Python message above applies.
+- The manual plugin statusline command calls `python3` directly, not through the launcher, so on native Windows it needs a real `python3` on `PATH`.
+- On native Windows, use file names without control characters, and keep installation, state and backup paths below the 260-character MAX_PATH limit with room for the files beneath them; longer paths are not supported.
+- An install made on native Windows by Router or Harness 0.2 is not a supported starting point. Upgrade both tools to 0.3.1 before uninstalling either one there: a 0.2 uninstaller predates Windows support and can misread the current sibling's manifest paths.
 
 <!-- shared:begin -->
 ### Install both
@@ -282,7 +317,7 @@ unchanged profile the installer added and preserves other configuration.
 The installer does not change the global `default_permissions` setting.
 `CODEX_HOME` also applies to this configuration file.
 Unsupported TOML layouts are left unchanged with a message. This includes inline
-permission containers and, on Python 3.10, multiline values. For those layouts,
+permission containers and, on Python 3.9 and 3.10, multiline values. For those layouts,
 merge the named profile tables manually without changing `default_permissions`.
 
 Never pass `-s` with `-c default_permissions=harness-judge`: `-s` overrides the
@@ -356,7 +391,7 @@ Override them at the Git root in `.claude/checkpoint.json` or
 
 Reminders default to 65% and 85% of the live context window. The window comes
 from the Claude statusline, then the rollout window on Codex, then, on Claude
-only, the last statusline window seen if it is under 10 minutes old;
+only, the last statusline window seen if it is 10 minutes old or less;
 `window_tokens` is only the fallback when none is known.
 To fix a threshold instead, set `remind_at` or `urgent_at` as a token count:
 
@@ -428,8 +463,14 @@ Keep durable project facts in `STATE.md`; avoid credentials, transcripts, and
 private environment values. Read the `checkpoint` skill for checkpoint and compaction
 rules. The project-handoff helper reports Git state without changing the tree.
 
-The shell guard recognizes known command patterns. It is a guardrail, not a
-sandbox or a substitute for host permissions.
+The shell guard recognizes known command patterns. It is a seatbelt, not a
+sandbox or a substitute for host permissions. It still passes shell code it
+cannot read as text: code spelled with `echo -e` escapes, printf octal escapes
+such as `\174`, or a here-string built from printf output. It also does not
+follow a value bound by `read`, `printf -v` or a for-loop variable and later run
+by a shell. After a `cd` it
+cannot follow, such as `cd -` or `cd "$DIR"`, it checks relative paths as if the
+shell were in your home.
 
 Automatic formatting is off by default. Set `HARNESS_AUTO_FORMAT=1` in the host
 process environment only for repositories whose tooling you trust. After edits,
@@ -446,8 +487,21 @@ All repository tests run offline, use temporary directories where needed, and
 make no model calls:
 
 ```bash
-timeout 900 bash -c 'for t in tests/test_*.py; do python3 "$t" || exit 1; done && for t in tests/test_*.sh; do bash "$t" || exit 1; done && bash tests/fresh-user.sh && bash tests/fresh-user-codex.sh'
+python3 tests/run_all.py
 ```
+
+On native Windows, run `python tests/run_all.py` in Git Bash. It runs every test
+file under a per-file timeout and lists every failure, so stock macOS needs no
+GNU `timeout`.
+
+On native Windows, some checks skip and print why: POSIX owner and mode assertions
+and chmod-based unreadable-file fixtures, FIFO fixtures (Windows Python has no
+`os.mkfifo`), symlink assertions when the account cannot create symlinks, and
+fixtures that need control-character file names or paths past 260 characters.
+The POSIX-API simulation self-check runs only under `PYTHONPATH=tests/win_sim`.
+Tests that deny access with mode 000 also skip under root. Upgrade tests from the
+0.1 and 0.2 releases run those releases' installers, which need Python 3.10 or
+newer; without one, only those cases skip, as on stock macOS.
 
 `tests/fresh-user.sh` installs into an empty temporary home, checks every hook
 entry, exercises the installed guard and context injector, verifies cost output,

@@ -3,7 +3,9 @@
 set -euo pipefail
 
 test_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-python3 - "$test_root/hooks/context/inject-project-context.sh" <<'PY'
+# pyrun.sh picks the interpreter the hooks use: python3, python or py -3, never the Store stub.
+python=$("$BASH" "$test_root/hooks/pyrun.sh" --find harness)
+"$python" - "$test_root/hooks/context/inject-project-context.sh" <<'PY'
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -14,6 +16,8 @@ import tempfile
 import unittest
 
 HOOK = Path(sys.argv.pop()).resolve()
+sys.path.insert(0, str(HOOK.parents[2] / "tests"))
+from _platform import BASH, home_env, posix
 
 
 class ContextTests(unittest.TestCase):
@@ -24,7 +28,7 @@ class ContextTests(unittest.TestCase):
         self.home = self.base / "home"
         self.home.mkdir()
         self.env = {
-            "HOME": str(self.home),
+            **home_env(self.home),
             "XDG_STATE_HOME": str(self.base / "state"),
             "PATH": os.environ["PATH"],
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -44,7 +48,7 @@ class ContextTests(unittest.TestCase):
         payload = {"cwd": str(cwd or self.repo)}
         if session is not None:
             payload["session_id"] = session
-        command = ["bash", str(HOOK)] + (["--reset"] if reset else [])
+        command = [BASH, posix(HOOK)] + (["--reset"] if reset else [])
         result = subprocess.run(command, input=raw if raw is not None else json.dumps(payload).encode(),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.base,
                                 env=env or self.env, timeout=5)

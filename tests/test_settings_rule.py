@@ -6,23 +6,31 @@ install and uninstall order, the sibling's empty events and folders, a true no-o
 The fake sibling follows Router's installer rules (lane 3R18): its hook blocks, private
 .router-backup-<ns> files and its manifest fields; it uninstalls by the shared rule. No Router
 checkout, network or model is used. The 0.1 and 0.2 starts need HARNESS_V01 and HARNESS_V02
-from old-trees.sh; a test that needs one fails when it is unset, it never skips.
+from old-trees.sh; a test that needs one fails when it is unset. Under a python3 older than
+3.10 those starts run with a verified newer interpreter from PATH, and are skipped only when none exists.
 """
+import atexit
 import copy
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import (BASH, IS_WINDOWS, home_env, posix, posix_modes, python_shim,  # noqa: E402
+                       skip_unless_posix_modes)
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 HOSTS = (("claude", "settings.json"), ("codex", "hooks.json"))
 PLAIN = b'{\n\t"z": 2,\n\t"a": 1\n}'
@@ -64,6 +72,46 @@ def payload(host):
     return files
 
 
+RELEASED_PYTHON = {}  # shim folders keyed by the installer's actual Python floor
+
+
+def released_env(env, tree):
+    """Use a Python meeting this tree's floor, without reusing a lower-floor shim."""
+    if env.get("HOME"):  # the old installers use Path.home(), which reads USERPROFILE on Windows
+        env = dict(env, **home_env(env["HOME"]))
+    match = re.search(r"sys\.version_info < \((\d+), (\d+)\)", (Path(tree) / "install.sh").read_text())
+    floor = tuple(map(int, match.groups())) if match else (3, 9)
+    if sys.version_info >= floor and not IS_WINDOWS:
+        return env
+    if floor not in RELEASED_PYTHON:
+        found = sys.executable if sys.version_info >= floor else None
+        if found is None:
+            search = os.environ.get("PATH", os.defpath)
+            names = [f"python3.{minor}" for minor in range(20, floor[1] - 1, -1)] + ["python3", "python", "py"]
+            for name in names:
+                candidate = shutil.which(name, path=search)
+                if not candidate:
+                    continue
+                args = [candidate] + (["-3"] if name == "py" else [])
+                try:
+                    result = subprocess.run(args + ["-c", "import sys; print(sys.executable) if sys.version_info >= "
+                                                    + repr(floor) + " else sys.exit(1)"],
+                                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if result.returncode == 0 and result.stdout.strip():
+                    found = result.stdout.strip()
+                    break
+        if found is None:
+            raise unittest.SkipTest("the release installer needs Python " + ".".join(map(str, floor))
+                                    + " or newer; none is on PATH")
+        folder = Path(tempfile.mkdtemp(prefix="harness-released-python-"))
+        atexit.register(shutil.rmtree, folder, True)
+        python_shim(folder, found)
+        RELEASED_PYTHON[floor] = str(folder)
+    return dict(env, PATH=RELEASED_PYTHON[floor] + os.pathsep + env.get("PATH", os.defpath))
+
+
 class FakeRouter:
     """Router as Harness meets it. package=None writes a 0.2 manifest and 0.2 backups (no record,
     backups keep the settings mode); old="0.1" also leaves out had_hooks and existing_empty_events;
@@ -91,12 +139,20 @@ class FakeRouter:
             os.chmod(name, mode_of(path))
         os.replace(name, path)
 
+    def fresh_backup(self):
+        stamp = time.time_ns()
+        while True:
+            backup = self.settings.with_name(f"{self.filename}.router-backup-{stamp}")
+            if not backup.exists() and not backup.is_symlink():
+                return backup
+            stamp += 1
+
     def save(self, value, original):
         if value == original and self.settings.exists():
             return None
         backup = None
         if self.settings.exists():
-            backup = self.settings.with_name(f"{self.filename}.router-backup-{time.time_ns()}")
+            backup = self.fresh_backup()
             shutil.copy2(self.settings, backup)
             if self.package is not None:
                 os.chmod(backup, 0o600)
@@ -119,7 +175,7 @@ class FakeRouter:
         data = (self.home / name).read_bytes()
         if sibling.get("settings_original_sha256") not in (None, digest(data)):
             return None
-        copied = self.settings.with_name(f"{self.filename}.router-backup-{time.time_ns()}")
+        copied = self.fresh_backup()
         self.write(copied, data, 0o600)
         return {"existed": True, "backup": copied.name, "sha256": digest(data),
                 "mode": sibling.get("settings_original_mode")}
@@ -257,7 +313,8 @@ class RuleBase(unittest.TestCase):
     def harness(self, *options, tree=ROOT, hosts=("both",)):
         out = ""
         for host in hosts:
-            result = subprocess.run(["bash", str(tree / "install.sh"), "--host", host, *options], env=self.env,
+            result = subprocess.run([BASH, posix(tree / "install.sh"), "--host", host, *options],
+                                    env=released_env(self.env, tree),
                                     text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
             self.assertEqual((result.returncode, result.stderr), (0, ""), result.stdout + result.stderr)
             out += result.stdout
@@ -303,15 +360,20 @@ class RuleBase(unittest.TestCase):
         manifest = self.manifest(host)
         record = {key: manifest.get(key, "absent") for key in (
             "settings_original_existed", "settings_original_sha256", "settings_original_mode")}
-        self.assertEqual(record, {"settings_original_existed": existed,
-                                  "settings_original_sha256": None if data is None else digest(data),
-                                  "settings_original_mode": mode}, host)
+        expected = {"settings_original_existed": existed,
+                    "settings_original_sha256": None if data is None else digest(data), "settings_original_mode": mode}
+        modes = posix_modes(self, "the recorded settings mode and the 0o600 backup")
+        if not modes:
+            del record["settings_original_mode"], expected["settings_original_mode"]
+        self.assertEqual(record, expected, host)
         name = manifest.get("settings_original_backup", "absent")
         if data is None or existed is None:
             self.assertIsNone(name, host)
             return None
         path = self.homes[host] / name
-        self.assertEqual((path.read_bytes(), oct(mode_of(path))), (data, oct(0o600)), host)
+        self.assertEqual(path.read_bytes(), data, host)
+        if modes:
+            self.assertEqual(oct(mode_of(path)), oct(0o600), host)
         if backup is not None:
             self.assertEqual(path, backup, host)
         return path
@@ -322,7 +384,9 @@ class RuleBase(unittest.TestCase):
             if data is None:
                 self.assertFalse(path.exists() or path.is_symlink(), f"{host}: settings left behind")
             else:
-                self.assertEqual((path.read_bytes(), oct(mode_of(path))), (data, oct(mode)), host)
+                self.assertEqual(path.read_bytes(), data, host)
+                if posix_modes(self, "the restored settings mode"):
+                    self.assertEqual(oct(mode_of(path)), oct(mode), host)
 
     def uninstall_harness(self, last, absent=None):
         """Harness --uninstall with every printed line asserted. last: no Router left in settings."""
@@ -361,7 +425,10 @@ class RuleBase(unittest.TestCase):
                 for host, home in self.homes.items()}
 
     def unreadable(self, path):
+        if not posix_modes(self, "a mode 000 backup"):
+            self.skipTest("no POSIX file modes on this OS (a mode 000 backup)")
         if os.geteuid() == 0:
+            print(f"SKIP {self.id()}: root reads a mode 000 file", file=sys.stderr, flush=True)
             self.skipTest("root reads a mode 000 file")
         path.chmod(0)
         self.addCleanup(path.chmod, 0o600)
@@ -478,8 +545,10 @@ class RecordTheOriginal(RuleBase):
         for host, _ in HOSTS:
             self.assertEqual(len(old[host]), 1, f"{name} left no settings backup for {host}")
             backup = next(iter(old[host]))
-            self.assertEqual((backup.read_bytes(), mode_of(backup)), (PLAIN, 0o600), host)
-            self.assertEqual(mode_of(self.settings(host)), 0o600, f"{name} did not write settings 0600")
+            self.assertEqual(backup.read_bytes(), PLAIN, host)
+            if posix_modes(self, "a 0o600 backup and settings"):
+                self.assertEqual(mode_of(backup), 0o600, host)
+                self.assertEqual(mode_of(self.settings(host)), 0o600, f"{name} did not write settings 0600")
         self.install_checked()
         for host, _ in HOSTS:
             # Harness 0.x went first: its own backup is the original, and it is 0600.
@@ -513,7 +582,7 @@ class RecordTheOriginal(RuleBase):
             later.write_bytes(b'{"later": 1}')
             mine = self.homes[host] / f"{dict(HOSTS)[host]}.harness-backup-decoy"
             mine.write_bytes(b'{"decoy": 1}')
-            os.utime(mine, ns=(number + 2, number + 2))
+            os.utime(mine, ns=(number + 200, number + 200))  # later even in NTFS's 100 ns steps
         old = {host: self.backups(host) for host, _ in HOSTS}
         counts = {host: self.writes(host) for host, _ in HOSTS}
         out = self.harness()
@@ -614,9 +683,13 @@ class Rulings(RuleBase):
             fake.install()
         for host, fake in self.router.items():
             self.assertNotIn("existing_empty_events", json.loads(fake.manifest_path.read_text()), host)
-        self.harness()
+        new = self.install_checked()
         for host, _ in HOSTS:
             self.assertEqual(self.manifest(host)["existing_empty_events"], ["Stop"], host)
+            # Harness copied the original that Router 0.1 backed up into a backup of its own.
+            original = self.homes[host] / self.manifest(host)["settings_original_backup"]
+            self.assertIn(original, new[host], host)
+            self.assertEqual(original.read_bytes(), EMPTY_STOP, host)
         self.router = {host: FakeRouter(self.homes[host], name) for host, name in HOSTS}
         for fake in self.router.values():
             fake.install()
@@ -645,11 +718,14 @@ class UninstallRestore(RuleBase):
                 self.assert_original(data, mode)
 
     def test_both_uninstall_orders_give_back_bytes_and_mode(self):
-        self.check_orders(PLAIN, MODE)
+        # Windows clocks can give the same timestamp to both backup writes.
+        with mock.patch.object(time, "time_ns", return_value=123456789):
+            self.check_orders(PLAIN, MODE)
 
     def test_original_absent_file_is_removed_in_both_orders(self):
         self.check_orders(None, None)
 
+    @skip_unless_posix_modes("a recorded 0o775 settings mode comes back as 0o755")
     def test_recorded_mode_comes_back_without_group_or_other_write(self):
         self.seed(PLAIN, 0o777)
         for fake in self.router.values():
@@ -681,8 +757,9 @@ class UninstallRestore(RuleBase):
         for host, _ in HOSTS:
             path = self.settings(host)
             # D-P2: a rewrite keeps the file's mode (the seeded 0640).
-            self.assertEqual((path.read_bytes(), oct(mode_of(path))),
-                             (canon({"z": 2, "a": 1, "later_edit": True}), oct(MODE)), host)
+            self.assertEqual(path.read_bytes(), canon({"z": 2, "a": 1, "later_edit": True}), host)
+            if posix_modes(self, "the seeded 0o640 kept by a rewrite"):
+                self.assertEqual(oct(mode_of(path)), oct(MODE), host)
 
 
 class SiblingFacts(RuleBase):

@@ -16,7 +16,7 @@ import spend
 
 
 def display():
-    payload = json.load(sys.stdin)
+    payload = json.loads(sys.stdin.buffer.read())
     if not isinstance(payload, dict):
         return
     settings = journal.preferences(payload)

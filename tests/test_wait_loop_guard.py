@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -17,7 +18,7 @@ class WaitLoopTests(unittest.TestCase):
         self.env = dict(os.environ, HOME=self.temp.name, PYTHONDONTWRITEBYTECODE="1")
 
     def call(self, command, *args):
-        return subprocess.run(["python3", str(HOOK), *args], input=command, text=True, capture_output=True, cwd=self.temp.name, env=self.env, timeout=5)
+        return subprocess.run([sys.executable, str(HOOK), *args], input=command, text=True, capture_output=True, cwd=self.temp.name, env=self.env, timeout=5)
 
     def test_wait_requires_bound(self):
         result = self.call("until test -f ready; do sleep 1; done")

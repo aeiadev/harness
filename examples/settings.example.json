@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/harness/hooks/checkpoint/dispatch.py\" restore --host=claude",
+            "command": "sh \"$HOME/.claude/harness/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py restore --host=claude",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/harness/hooks/checkpoint/dispatch.py\" restore --host=claude",
+            "command": "sh \"$HOME/.claude/harness/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py restore --host=claude",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$HOME/.claude/harness/hooks/guard/danger-cmd-guard.sh\"",
+            "command": "sh \"$HOME/.claude/harness/hooks/pyrun.sh\" harness block guard/danger_cmd_guard.py",
             "timeout": 10
           }
         ]
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/harness/hooks/checkpoint/dispatch.py\" check --host=claude",
+            "command": "sh \"$HOME/.claude/harness/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py check --host=claude",
             "timeout": 10
           }
         ]
@@ -91,7 +91,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/harness/hooks/checkpoint/dispatch.py\" archive --host=claude",
+            "command": "sh \"$HOME/.claude/harness/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py archive --host=claude",
             "timeout": 10
           }
         ]
@@ -113,7 +113,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/harness/hooks/checkpoint/dispatch.py\" snapshot --host=claude",
+            "command": "sh \"$HOME/.claude/harness/hooks/pyrun.sh\" harness warn checkpoint/dispatch.py snapshot --host=claude",
             "timeout": 10
           }
         ]
@@ -122,6 +122,6 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "python3 \"$HOME/.claude/harness/statusline/statusline.py\""
+    "command": "sh \"$HOME/.claude/harness/hooks/pyrun.sh\" harness status ../statusline/statusline.py"
   }
 }

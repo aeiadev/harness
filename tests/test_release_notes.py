@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """Release notes extraction with literal version matching and exact errors."""
 import re
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, posix  # noqa: E402
 SCRIPT = ROOT / "scripts/release-notes.sh"
 
 
 class ReleaseNotesTests(unittest.TestCase):
     def call(self, *args):
-        return subprocess.run(["bash", str(SCRIPT), *map(str, args)],
+        # MSYS=noglob: Git Bash started from a Windows program would expand an argument such as .* itself.
+        return subprocess.run([BASH, posix(SCRIPT), *map(str, args)], env=dict(os.environ, MSYS="noglob"),
                               text=True, capture_output=True, timeout=10)
 
     def assert_message(self, actual, expected):
