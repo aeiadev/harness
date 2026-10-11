@@ -18,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -322,6 +323,17 @@ class CreatedPathTests(Base):
 
 
 class UpgradeCleanupTests(Base):
+    @staticmethod
+    def shipped_source(relative, host):
+        """Map a destination to the shipped file without consulting the installer."""
+        for prefix, folder in (("harness/hooks/", "hooks"),
+                               ("harness/statusline/", "statusline"),
+                               ("agents/", "agents" if host == "claude" else "codex/agents"),
+                               ("skills/", "skills")):
+            if relative.startswith(prefix):
+                return ROOT / folder / relative[len(prefix):]
+        raise AssertionError(f"unexpected installed payload path: {relative}")
+
     def extended_tree(self, name):
         tree = self.root / f"tree-{name}"
         if not tree.exists():
@@ -341,14 +353,59 @@ class UpgradeCleanupTests(Base):
                 top = self.host_home(host)
                 for relative in EXTRAS[host]:
                     self.assertTrue((top / relative).is_file())
+                guide = "harness/hooks/checkpoint/guide.md"
+                read_only = "harness/hooks/guard/wait-loop-guard.py"
+                self.assertFalse((top / "router/install-manifest.json").exists(),
+                                 "read-only repair fixture must have no sibling claim")
+                owned = {relative.replace("\\", "/"): expected
+                         for relative, expected in self.manifest(host)["files"].items()}
+                for relative in (guide, read_only):
+                    source = self.shipped_source(relative, host)
+                    self.assertIn(relative, owned)
+                    self.assertEqual((top / relative).read_bytes(), source.read_bytes(),
+                                     f"{relative} must be retained with equal bytes")
+                modes = posix_modes(self, "private legacy preservation and read-only repair")
+                if modes:
+                    (top / guide).chmod(0o600)
+                    (top / read_only).chmod(0o444)
+                before = {relative: ((top / relative).read_bytes(), stat.S_IMODE((top / relative).stat().st_mode))
+                          for relative in owned}
+                if modes:
+                    self.assertEqual(before[guide][1], 0o600)
+                    self.assertEqual(before[read_only][1], 0o444)
+                    self.assertTrue(before[guide][1] & stat.S_IWUSR)
+                    self.assertFalse(before[read_only][1] & stat.S_IWUSR)
                 output = self.run_install(host).stdout
                 for relative in EXTRAS[host]:
                     self.assertFalse((top / relative).exists(), f"left no-longer-shipped {relative}")
                     self.assertIn(f"Removed no-longer-shipped: {relative}", output)
                     self.assertNotIn(relative, self.manifest(host)["files"])
-                for relative in self.manifest(host)["files"] if posix_modes(self, "installed files 0o644 or 0o755") else ():
-                    mode = stat.S_IMODE((top / relative).stat().st_mode)
-                    self.assertIn(mode, (0o644, 0o755), f"{relative} has mode {oct(mode)}")
+                new_files, replaced_files = [], []
+                for relative in self.manifest(host)["files"]:
+                    source = self.shipped_source(relative, host)
+                    self.assertTrue(source.is_file(), relative)
+                    shipped = source.read_bytes()
+                    current = (top / relative).read_bytes()
+                    self.assertEqual(current, shipped, relative)
+                    old = before.get(relative)
+                    if old is not None and old[0] == shipped and (not modes or old[1] & stat.S_IWUSR):
+                        self.assertEqual(current, old[0], f"retained bytes changed: {relative}")
+                        if modes:
+                            self.assertEqual(stat.S_IMODE((top / relative).stat().st_mode), old[1],
+                                             f"retained owner-writable mode changed: {relative}")
+                    else:
+                        if old is None:
+                            new_files.append(relative)
+                        elif old[0] != shipped:
+                            replaced_files.append(relative)
+                        if modes:
+                            expected = 0o755 if source.stat().st_mode & 0o111 else 0o644
+                            self.assertEqual(stat.S_IMODE((top / relative).stat().st_mode), expected,
+                                             f"new, replaced, or owned read-only file: {relative}")
+                self.assertTrue(new_files, "fixture must exercise a new payload write")
+                self.assertTrue(replaced_files, "fixture must exercise a replaced payload write")
+                self.assertIn(guide, self.manifest(host)["files"])
+                self.assertIn(read_only, self.manifest(host)["files"])
                 self.run_install(host, "--uninstall")
                 self.assertFalse((top / "harness/install-manifest.json").exists())
 
@@ -357,6 +414,47 @@ class UpgradeCleanupTests(Base):
 
     def test_v02_upgrade_removes_unshipped_files(self):
         self.check_upgrade("HARNESS_V02")
+
+    @skip_unless_posix_modes("old archive extraction and upgrade under 0o077 and 0o022 umasks")
+    def test_upgrade_with_masked_old_archive(self):
+        case = os.environ.get("HARNESS_MODE_CASE")
+        if case is None:
+            for mask in (0o077, 0o022):
+                for name in ("HARNESS_V01", "HARNESS_V02"):
+                    with self.subTest(mask=oct(mask), tree=name):
+                        env = dict(os.environ, HARNESS_MODE_CASE=f"{mask:o}:{name}")
+                        result = subprocess.run([sys.executable, __file__,
+                                                 "UpgradeCleanupTests.test_upgrade_with_masked_old_archive"],
+                                                env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                                text=True, timeout=240)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+        mask_text, name = case.split(":", 1)
+        mask = int(mask_text, 8)
+        self.assertIn(mask, (0o077, 0o022))
+        self.assertIn(name, ("HARNESS_V01", "HARNESS_V02"))
+        os.umask(mask)  # This process creates the archive, extracts it, installs, and upgrades.
+        archive = self.root / "old.tar"
+        with tarfile.open(archive, "w") as tar:
+            def git_modes(info):
+                info.mode = (0o755 if info.mode & 0o111 else 0o644) if info.isfile() else 0o755
+                return info
+            tar.add(old_tree(name), arcname=".", filter=git_modes)
+        extracted = self.root / "extracted"
+        extracted.mkdir()
+        subprocess.run([BASH, "-c", 'tar -xf "$1" -C "$2"', "tar", str(archive), str(extracted)],
+                       check=True, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        guide_mode = stat.S_IMODE((extracted / "hooks/checkpoint/guide.md").stat().st_mode)
+        self.assertEqual(guide_mode, 0o600 if mask == 0o077 else 0o644)
+        os.environ[name] = str(extracted)
+        self.check_upgrade(name)
+        if mask == 0o077:
+            fresh = self.root / "fresh"
+            fresh.mkdir()
+            self.run_tree(ROOT, "claude", home=fresh)
+            installed = fresh / ".claude/harness/hooks/checkpoint/guide.md"
+            self.assertEqual(installed.read_bytes(), (ROOT / "hooks/checkpoint/guide.md").read_bytes())
+            self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o644)
 
     def test_edited_old_file_survives_and_is_reported(self):
         tree = self.extended_tree("HARNESS_V01")

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2
+
+Pairs with Router 0.3.2.
+
+### Changed
+
+- Align the paired version with Router 0.3.2 for shared roles and CI resolution.
+
 ## 0.3.1
 
 Pairs with Router 0.3.1. An older Router that installed different shared roles keeps them, and the installer prints one notice to upgrade it.

@@ -45,7 +45,7 @@ PYTHON_LOOKUP = (
     "the danger guard exits 2 so the command stays blocked, and the statusline shows the same line.")
 HOME_LINE = ("On native Windows, Harness takes the home from `HOME` before Windows Python's `USERPROFILE` lookup, "
              "so Git Bash, the hosts and Harness agree on it.")
-PAIRING = "Router 0.3.1 pairs with Harness 0.3.1. Native Windows support starts at 0.3.1."
+PAIRING = "Router 0.3.2 pairs with Harness 0.3.2. Native Windows support starts at 0.3.1."
 LIMITS = [
     "- On native Windows, POSIX owner checks and file modes such as 0600 and 0700 are not enforced; use Windows account "
     "and folder permissions to control access. The file modes named elsewhere in this README apply to POSIX systems.",
