@@ -32,7 +32,9 @@ class SymlinkedStatePaths(unittest.TestCase):
         for name in ("home", "state", "outside"):
             (self.real / name).mkdir()
         self.project = self.real / "project"
-        (self.project / ".git").mkdir(parents=True)
+        self.project.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.project)], stdin=subprocess.DEVNULL,
+                       capture_output=True, check=True, timeout=5)
         (self.project / ".claude").mkdir()
         (self.project / ".claude/checkpoint.json").write_text(json.dumps(
             {"remind_at": 100, "urgent_at": 200, "window_tokens": 300, "repeat_after": 50}))

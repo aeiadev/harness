@@ -97,6 +97,60 @@ class ContextTests(unittest.TestCase):
         self.assertNotIn("../AGENTS.md", output)
         self.assertIn("Current checkpoint.", output)
 
+    def test_declared_non_git_and_malformed_cwd_fallback(self):
+        plain = self.base / "plain"
+        plain.mkdir()
+        (plain / "STATE.md").write_text("Declared plain state")
+        self.assertEqual(self.call(cwd=plain, session=None), "")
+        declared = {**self.env, "HARNESS_PROJECT_ROOT": str(plain)}
+        self.assertIn("Declared plain state", self.call(cwd=plain, session=None, env=declared))
+        sibling = self.base / "sibling"
+        sibling.mkdir()
+        (sibling / "STATE.md").write_text("Sibling state")
+        self.assertEqual(self.call(cwd=sibling, session=None, env=declared), "")
+        self.assertEqual(self.call(cwd=sibling, session=None,
+                                   env={**self.env, "HARNESS_PROJECT_ROOT": str(Path(self.base.anchor))}), "")
+        payload = {"cwd": ["bad"], "project_dir": str(self.repo), "session_id": "fallback"}
+        self.assertIn("Current checkpoint.", self.call(raw=json.dumps(payload).encode()))
+        payload = {"cwd": " ", "workspace": {"current_dir": str(self.repo)},
+                   "session_id": "workspace"}
+        self.assertIn("Current checkpoint.", self.call(raw=json.dumps(payload).encode()))
+
+    def test_home_git_and_symlinked_files_are_excluded(self):
+        subprocess.run(["git", "init", "-q", str(self.home)], stdin=subprocess.DEVNULL,
+                       capture_output=True, env=self.env, check=True, timeout=5)
+        (self.home / "STATE.md").write_text("HOME STATE")
+        self.assertEqual(self.call(cwd=self.home, session=None), "")
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "STATE.md").write_text("ESCAPED STATE")
+        (outside / "CLAUDE.md").write_text("ESCAPED INSTRUCTIONS")
+        try:
+            (self.repo / "CLAUDE.md").symlink_to(outside / "CLAUDE.md")
+            (self.repo / "STATE.md").unlink()
+            (self.repo / "STATE.md").symlink_to(outside / "STATE.md")
+        except (OSError, NotImplementedError):
+            self.skipTest("this user cannot create symlinks")
+        self.assertEqual(self.call(session=None), "")
+
+    def test_git_worktree_and_canonical_symlink_root(self):
+        env = {**self.env, "GIT_AUTHOR_NAME": "Fixture Author", "GIT_AUTHOR_EMAIL": "fixture.invalid",
+               "GIT_COMMITTER_NAME": "Fixture Committer", "GIT_COMMITTER_EMAIL": "fixture.invalid"}
+        subprocess.run(["git", "-C", str(self.repo), "add", "STATE.md"],
+                       stdin=subprocess.DEVNULL, capture_output=True, env=env, check=True, timeout=5)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "fixture"],
+                       stdin=subprocess.DEVNULL, capture_output=True, env=env, check=True, timeout=5)
+        tree = self.base / "worktree"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--detach", str(tree)],
+                       stdin=subprocess.DEVNULL, capture_output=True, env=env, check=True, timeout=5)
+        self.assertIn("Current checkpoint.", self.call(cwd=tree, session=None))
+        linked = self.base / "linked-project"
+        try:
+            linked.symlink_to(self.repo, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this user cannot create symlinks")
+        self.assertIn("Current checkpoint.", self.call(cwd=linked, session=None))
+
     def test_large_state_has_hard_cap_and_complete_paragraphs(self):
         paragraphs = ["Paragraph %d: %s END-%d" % (number, "x" * 350, number) for number in range(90)]
         (self.repo / "STATE.md").write_text("\n\n".join(paragraphs) + "\n", encoding="utf-8")
@@ -165,6 +219,51 @@ class ContextTests(unittest.TestCase):
         self.assertNotIn("START-", output, "Oversized paragraph was partially included")
         self.assertIn("[truncated: read STATE.md for the rest.]", output)
         self.assertIn("</project-context>", output)
+
+    def test_later_sections_survive_oversized_early_paragraph_on_both_hosts(self):
+        (self.repo / "STATE.md").write_text(
+            "## Status\n" + "old filler " * 2500 + "\n\n"
+            "## Objective\nShip the current fix.\n\n"
+            "## Constraints\nKeep local changes.\n\n"
+            "## Next move\nRun the focused regression.\n\n"
+            "## Proof\nSee tests/test_restore.py.\n\n"
+            "## Failures\nOne unresolved failure remains.\n", encoding="utf-8")
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                payload = {"cwd": str(self.repo), "session_id": host, "model":
+                           "gpt-6-sol" if host == "codex" else "claude-sonnet"}
+                output = self.call(raw=json.dumps(payload).encode())
+                for phrase in ("Run the focused regression.", "Ship the current fix.",
+                               "Keep local changes.", "tests/test_restore.py",
+                               "One unresolved failure remains."):
+                    self.assertIn(phrase, output)
+                self.assertNotIn("�", output)
+
+    def test_repeated_sections_do_not_crowd_out_current_facts(self):
+        (self.repo / "STATE.md").write_text(
+            "## Status\n" + "old filler " * 2500 + "\n" +
+            "".join(f"## Objective\nOld objective {number}\n" for number in range(12)) +
+            "## Next move\nCURRENT NEXT ACTION\n"
+            "## Constraints\nPRESERVE USER WORK\n"
+            "## Proof\nCURRENT PROOF POINTER\n"
+            "## Failures\nUNRESOLVED FAILURE\n", encoding="utf-8")
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                payload = {"cwd": str(self.repo), "session_id": host, "model":
+                           "gpt-6-sol" if host == "codex" else "claude-sonnet"}
+                output = self.call(raw=json.dumps(payload).encode())
+                for phrase in ("CURRENT NEXT ACTION", "PRESERVE USER WORK",
+                               "CURRENT PROOF POINTER", "UNRESOLVED FAILURE",
+                               "Old objective 11"):
+                    self.assertIn(phrase, output)
+
+    def test_late_action_after_megabyte_paragraph(self):
+        (self.repo / "STATE.md").write_text(
+            "## Status\n" + "界" * 400000 + "\n## Next move\nRun the late check.\n",
+            encoding="utf-8")
+        output = self.call(session=None)
+        self.assertIn("Run the late check.", output)
+        self.assertNotIn("�", output)
 
     def test_unrelated_markdown_is_not_checkpoint_input(self):
         (self.repo / "notes.md").write_text("Unrelated material.")

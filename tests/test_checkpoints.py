@@ -28,7 +28,8 @@ class CheckpointContract(unittest.TestCase):
         self.project = self.base / "project"
         self.home.mkdir()
         self.project.mkdir()
-        (self.project / ".git").mkdir()
+        subprocess.run(["git", "init", "-q", str(self.project)], stdin=subprocess.DEVNULL,
+                       capture_output=True, check=True, timeout=5)
         self.environment = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home),
                                 XDG_STATE_HOME=str(self.base / "local"),
                                 PYTHONDONTWRITEBYTECODE="1")
@@ -296,6 +297,78 @@ class CheckpointContract(unittest.TestCase):
         other.mkdir()
         (other / "STATE.md").write_text("Unrelated record")
         self.assertIn("title validator", self.recover(cwd=str(other)))
+
+    def test_recognized_new_project_rebinds_and_does_not_leak_old_state(self):
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                self.usage(100, host)
+                self.assertIn("Refresh", self.invoke("PostToolUse", host, {"session_id": host}))
+                other = self.base / ("other-" + host)
+                other.mkdir()
+                subprocess.run(["git", "init", "-q", str(other)], stdin=subprocess.DEVNULL,
+                               capture_output=True, check=True, timeout=5)
+                config = other / ("." + host)
+                config.mkdir()
+                (config / "checkpoint.json").write_text(json.dumps({
+                    "remind_at": 100, "urgent_at": 200, "window_tokens": 300}))
+                self.assertIn("Refresh", self.invoke("PostToolUse", host, {
+                    "session_id": host, "cwd": str(other)}))
+                self.assertNotIn("title validator", self.invoke("SessionStart", host, {
+                    "source": "compact", "session_id": host, "cwd": str(other)}))
+                (other / "STATE.md").write_text("Current B state")
+                self.assertIn("Current B state", self.invoke("SessionStart", host, {
+                    "source": "compact", "session_id": host, "cwd": str(other)}))
+
+    def test_undeclared_non_git_and_home_are_private_drafts(self):
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                other = self.base / ("plain-" + host)
+                other.mkdir()
+                (other / "STATE.md").write_text("UNDECLARED")
+                self.assertNotIn("UNDECLARED", self.invoke("SessionStart", host, {
+                    "source": "compact", "session_id": host + "plain", "cwd": str(other)}))
+                subprocess.run(["git", "init", "-q", str(self.home)], stdin=subprocess.DEVNULL,
+                               capture_output=True, check=True, timeout=5)
+                (self.home / "STATE.md").write_text("HOME STATE")
+                self.assertNotIn("HOME STATE", self.invoke("SessionStart", host, {
+                    "source": "compact", "session_id": host + "home", "cwd": str(self.home)}))
+
+    def test_declared_plain_project_and_legacy_pin_validation(self):
+        plain = self.base / "plain"
+        plain.mkdir()
+        (plain / "STATE.md").write_text("PLAIN STATE")
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                fields = {"source": "compact", "session_id": "plain-" + host,
+                          "cwd": str(plain)}
+                self.assertNotIn("PLAIN STATE", self.invoke("SessionStart", host, fields))
+                declared = {**self.environment, "HARNESS_PROJECT_ROOT": str(plain)}
+                self.assertIn("PLAIN STATE", self.invoke("SessionStart", host, fields,
+                                                          environment=declared))
+                # The old non-Git receipt must stop working when its declaration disappears.
+                self.assertNotIn("PLAIN STATE", self.invoke("SessionStart", host, {
+                    **fields, "cwd": str(self.base)}, environment=self.environment))
+
+    def test_same_root_document_pin_and_escaping_config(self):
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                selected = self.project / (host + "-selected.md")
+                selected.write_text("PINNED " + host)
+                self.configure(host, checkpoint_path=selected.name)
+                fields = {"source": "compact", "session_id": "pin-" + host}
+                self.assertIn("PINNED " + host, self.invoke("SessionStart", host, fields))
+                self.configure(host, checkpoint_path="STATE.md")
+                self.assertIn("PINNED " + host, self.invoke("SessionStart", host, fields))
+                outside = self.base / (host + "-outside.json")
+                outside.write_text(json.dumps({"checkpoint_path": selected.name}))
+                config = self.project / ("." + host) / "checkpoint.json"
+                config.unlink()
+                try:
+                    config.symlink_to(outside)
+                except (OSError, NotImplementedError):
+                    self.skipTest("this user cannot create symlinks")
+                self.assertIn("title validator", self.invoke("SessionStart", host, {
+                    "source": "compact", "session_id": "escaped-" + host}))
 
     def test_subdirectory_wins_over_environment_fallback(self):
         nested = self.project / "src"

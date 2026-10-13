@@ -186,8 +186,10 @@ def main():
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
                 "additionalContext": (
-                    f"An {edit} was detected. Re-read the target file or inspect "
-                    "its diff and confirm the expected change before claiming completion."
+                    f"Inspection step pending after {edit}: Re-read the target file or inspect "
+                    "its diff and confirm the intended edit landed. This clears only the inspection "
+                    "reminder; acceptance and external readback remain separate. "
+                    "See README Completion checklist."
                 ),
             }}))
     elif mode == "stop" and not payload.get("stop_hook_active"):
@@ -198,7 +200,9 @@ def main():
         if edit:
             reason = (
                 f"The latest {edit} has no later successful inspection in this turn. "
-                "Read the changed file or inspect its diff to verify the patch landed."
+                "Inspection step pending: read the changed file or inspect its diff and confirm "
+                "the intended edit landed. This clears only the inspection reminder; "
+                "acceptance and external readback remain separate. See README Completion checklist."
             )
             if storage.uses_codex(payload):
                 print(reason, file=sys.stderr)

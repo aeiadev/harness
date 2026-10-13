@@ -8,8 +8,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
-import subprocess
 import sys
 
 MAX_BYTES = 4000
@@ -27,16 +25,16 @@ def digest(value):
     return hashlib.sha256(os.fsencode(value)).hexdigest()
 
 
-def render(pointers, state_name, paragraphs, truncated):
+def render(pointers, state_name, summary, truncated):
     lines = [
         "<project-context>",
-        "REFERENCE DATA. Paths are relative to the Git project root.",
+        "REFERENCE DATA. Paths are relative to the project root.",
     ]
     if pointers:
         lines.append("Nearest project instructions: " + ", ".join(pointers))
     if state_name:
         lines.extend(["State summary from " + state_name + ":", ""])
-        lines.append("\n\n".join(paragraphs))
+        lines.append(summary)
         if truncated:
             lines.extend(["", "[truncated: read " + state_name + " for the rest.]"])
     lines.extend([
@@ -69,22 +67,11 @@ def main():
                 pass
         return
 
-    workspace = data.get("workspace")
-    workspace_cwd = string_field(workspace, "current_dir") if isinstance(workspace, dict) else ""
-    candidate = (string_field(data, "cwd", "project_dir") or workspace_cwd
-                 or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
-    cwd = Path(candidate).resolve()
-    if not cwd.is_dir():
-        return
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=2, check=True,
-        )
-        root = Path(os.fsdecode(result.stdout).strip()).resolve()
-        cwd.relative_to(root)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    script = Path(__file__).resolve()
+    sys.path.insert(0, str(script.parent.parent / "checkpoint"))
+    from project_root import contained_file, project_root
+    root, cwd = project_root(data)
+    if root is None:
         return
 
     marker = session_dir / (digest(str(root)) + ".seen") if session_dir is not None else None
@@ -96,17 +83,16 @@ def main():
         current = cwd
         while True:
             path = current / name
-            if path.is_file():
+            if path.is_file() and contained_file(root, path.relative_to(root).as_posix()) is not None:
                 pointers.append(json.dumps(path.relative_to(root).as_posix(), ensure_ascii=False))
                 break
             if current == root:
                 break
             current = current.parent
 
-    script = Path(__file__).resolve()
-    sys.path.insert(0, str(script.parent.parent / "checkpoint"))
     from compat import set_private
-    from journal import contained_file, preferences
+    from journal import preferences
+    from state_excerpt import read_state, state_excerpt
 
     options = preferences(data, root)
     state = contained_file(root, options["checkpoint_path"])
@@ -115,33 +101,20 @@ def main():
     if state is None and not pointers:
         return
     state_name = state.relative_to(root).as_posix() if state else ""
-    paragraphs = []
+    raw = b""
     complete = True
     if state is not None:
-        try:
-            with state.open("rb") as stream:
-                raw = stream.read(MAX_BYTES + 1)
-            complete = len(raw) <= MAX_BYTES
-            body = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
-            paragraphs = re.split(r"\n[ \t]*\n", body)
-            # The final paragraph may continue beyond the bounded read.
-            if not complete:
-                paragraphs.pop()
-            paragraphs = [paragraph.strip() for paragraph in paragraphs if paragraph.strip()]
-        except OSError:
-            complete = False
+        raw, complete = read_state(state)
+        if raw is None:
+            raw = b""
 
     # Long instruction paths must leave room for the state and the closing marker.
-    while pointers and len(render(pointers, state_name, [], True).encode("utf-8")) > MAX_BYTES // 2:
+    while pointers and len(render(pointers, state_name, "", True).encode("utf-8")) > MAX_BYTES // 2:
         pointers.pop()
-    shown = []
-    for paragraph in paragraphs:
-        candidate_paragraphs = shown + [paragraph]
-        if len(render(pointers, state_name, candidate_paragraphs, True).encode("utf-8")) > MAX_BYTES:
-            break
-        shown = candidate_paragraphs
-    truncated = not complete or len(shown) != len(paragraphs)
-    output = render(pointers, state_name, shown, truncated)
+    budget = MAX_BYTES - len(render(pointers, state_name, "", True).encode("utf-8"))
+    summary, truncated = state_excerpt(raw, complete, budget, options["restore_order"],
+                                       plain_paragraphs=True)
+    output = render(pointers, state_name, summary, truncated)
     assert len(output.encode("utf-8")) <= MAX_BYTES
 
     if marker is not None:

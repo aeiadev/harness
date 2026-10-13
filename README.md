@@ -1,6 +1,6 @@
 # Harness
 
-Harness helps long sessions keep their plan and next move across compaction. Reminders follow the real context window, destructive shell commands are stopped, and nine roles work from a checked brief on Claude Code and Codex CLI.
+Harness helps long sessions keep their plan and next move across compaction. Reminders follow the real context window, destructive shell commands matching known patterns are stopped, and nine roles work from a checked brief on Claude Code and Codex CLI.
 
 Pair it with [Router](https://github.com/aeiadev/router) for automatic role routing and context pressure nudges.
 
@@ -9,7 +9,7 @@ Pair it with [Router](https://github.com/aeiadev/router) for automatic role rout
 | Part | Job |
 | --- | --- |
 | Context hook | Injects project instructions and state once per session, with output capped at 4,000 bytes (under 4 KB). |
-| Command guard | Blocks known destructive shell commands and unbounded waits before execution. |
+| Command guard | Blocks recognized destructive shell patterns and unbounded waits before execution. |
 | Checkpoint hooks | Ask for checkpoints as context fills, save compaction summaries, and hand state back after compaction. |
 | Helper hooks | Remind the agent to verify indirect edits; run installed formatters only when explicitly enabled. |
 | Spend | Claude's live statusline shows context and cost. Codex hooks write a spend side file and occasional messages. |
@@ -52,7 +52,8 @@ the statusline shows the same line. On native Windows, Harness takes the home fr
 `HOME` before Windows Python's `USERPROFILE` lookup, so Git Bash, the hosts and
 Harness agree on it. Limits for each platform follow the installation steps.
 
-Download or clone a reviewed release, then run from its directory:
+Download or clone the [Harness 0.4.0 release](https://github.com/aeiadev/harness/releases/tag/v0.4.0),
+then run from its directory:
 
 ```bash
 bash install.sh --dry-run
@@ -146,9 +147,20 @@ tool's next run quietly updates its own record. Uninstall restores the original
 settings bytes and mode without group or other write when the recorded original
 is available.
 
+For an offline host capability summary, run `bash install.sh --status --host claude`
+or `bash install.sh --status --host codex`. You can add `--host-version 2.1.296`
+or `--host-version 0.156.1`, respectively, if you already know the CLI version.
+That option requires one explicit host; without it, the version is unknown.
+The reference versions are version-output observations, not successful capability
+tests. Every reported host capability remains unverified even when the supplied
+version matches or exceeds the reference. The table describes source fixtures
+and fields consumed by the adapters; it neither probes a host nor changes hook
+trust. A missing local catalog is reported as unavailable; reinstall Harness to
+restore it. Verify behavior manually in a disposable host setup before relying on it.
+
 ### Platform limits
 
-Router 0.3.3 pairs with Harness 0.3.3. Native Windows support starts at 0.3.1.
+Router 0.4.0 pairs with Harness 0.4.0. Native Windows support starts at 0.3.1.
 
 - On native Windows, POSIX owner checks and file modes such as 0600 and 0700 are not enforced; use Windows account and folder permissions to control access. The file modes named elsewhere in this README apply to POSIX systems.
 - Harness installs regular files and creates no symbolic links, so it needs no symlink permission. Where symlinks are not allowed, Router installs copies instead, and its upgrade and uninstall handle those copies.
@@ -236,7 +248,7 @@ names, instructions, and model tiers remain in sync.
 The nine Markdown role files are pinned in `agents/SHARED.sha256`. Router uses
 the same role names and byte-identical Markdown files when both are installed.
 
-To use a role in Claude Code, ask the coordinator to use the role and provide its brief. The `sweeper`, `researcher`, and `planner` require TASK and RETURN; FILES and BAR are optional and must stay in TASK, FILES, BAR, RETURN order. The other roles require all four fields. For example:
+For repository work, ask the coordinator to use a role and provide its brief. For an authorized non-Git target, use the opt-in [operations profile](docs/operations.md) in 0.4.0. The `sweeper`, `researcher`, and `planner` require TASK and RETURN; FILES and BAR are optional and must stay in TASK, FILES, BAR, RETURN order. The other roles require all four fields. For example:
 
 #### Sweeper
 ```text
@@ -343,6 +355,25 @@ either host CLI.
 | `tdd` | Implementing a behavior through a failing test, a small fix, and cleanup. |
 | `skill-index` | Choosing among this repository's skills and roles. |
 
+## Completion checklist
+
+Run `python3 hooks/checkpoint/completion.py` in this checkout, or run
+`python3 <host-home>/harness/hooks/checkpoint/completion.py` after a script
+install. For a Claude plugin copy, run
+`python3 <plugin-root>/hooks/checkpoint/completion.py`. The command prints:
+
+```text
+Inspection: Inspect the actual changed files or diff and confirm the intended edits landed.
+Acceptance: Check requirements against BAR evidence and record verifier identity and provenance. Inspection or a reported PASS alone is not independent acceptance.
+External readback: Observe the resulting external state without replaying the mutation; record evidence, not-applicable, or unknown.
+```
+
+The indirect-edit hooks remind you about the inspection step. A successful Read
+or diff clears that reminder for the current turn only. It does not establish
+independent acceptance or external readback. Record each category's evidence or
+unknown status yourself. The checklist command only prints guidance; automatic
+checkpoint restore does not print the full checklist or run an observer.
+
 ## Configuration
 
 `examples/settings.example.json` contains Claude hook wiring.
@@ -370,13 +401,14 @@ the checkpoint, but cannot archive the unavailable summary text.
 | `CODEX_HOME` | `$HOME/.codex` | Codex installation and uninstall destination. |
 | `XDG_STATE_HOME` | `$HOME/.local/state` | Base for runtime files under `claude-harness`. |
 | `CLAUDE_PROJECT_DIR` | Unset | Project fallback when the hook payload has no `cwd`; process working directory is the final fallback. |
+| `HARNESS_PROJECT_ROOT` | Unset | Absolute existing root for a non-Git project; the hook cwd must be inside its canonical path. |
 | `HARNESS_AUTO_FORMAT` | Unset (off) | Set exactly `1` in the host environment to enable installed formatters for trusted projects. |
 | `HARNESS_SPEND_WARN` | Unset | Optional USD threshold for highlighting the session cost. |
 | `HARNESS_CODEX_RATES` | Unset | JSON mapping model names to `input`, `cached_input`, and `output` USD rates per million tokens. |
 | `HARNESS_SPEND_MESSAGE_SECONDS` | `300` | Minimum interval between Codex spend messages. |
 
 Checkpoint defaults are installed in `harness/hooks/checkpoint/policy.json`.
-Override them at the Git root in `.claude/checkpoint.json` or
+Override them at the project root in `.claude/checkpoint.json` or
 `.codex/checkpoint.json` for the corresponding host:
 
 ```json
@@ -411,10 +443,15 @@ value that is not a list, an empty list, or a list with a blank or non-text item
 falls back to it. `repeat_after` sets the
 additional token usage before another urgent reminder if the checkpoint has not
 changed. `checkpoint_path` must be a relative path inside the project, without
-symbolic links. `restore_bytes` is clamped to 1,000 through 4,000 bytes, including
-the recovery notice and file pointer. A session retains its checkpoint location
-when tools change directory. Sessions started in the home directory without a
-project use a private draft location reported by the meter.
+symbolic links. Project discovery uses Git, including nested directories and
+worktrees. A non-Git directory requires an absolute existing
+`HARNESS_PROJECT_ROOT` declaration containing the hook cwd after canonicalization.
+The home directory and filesystem root are excluded even if they contain `.git`.
+`restore_bytes` is clamped to 1,000 through 4,000 bytes, including the recovery
+notice and file pointer. A session retains its checkpoint location when tools
+change to a temporary or nonproject directory. A different recognized project
+takes over the binding even if it has no checkpoint yet. Sessions without a
+recognized project use a private draft location reported by the meter.
 
 The pressure file for Router is `$XDG_STATE_HOME/claude-harness/pressure/<session-hash>.json`,
 or `$HOME/.local/state` when XDG_STATE_HOME is unset or relative. Harness hashes
@@ -438,6 +475,38 @@ usage produces a token count. When Codex usage is incomplete, the hook writes no
 spend file and the segment shows nothing instead of `$--`. No rates are bundled, and estimates are
 not billing data.
 The display does not query a billing service or enforce a spending limit.
+
+### Offline usage accounting (opt in)
+
+Harness has a standalone usage command at `python3 <checkpoint>/usage_cli.py`.
+For a script installation, `<checkpoint>` is `~/.claude/harness/hooks/checkpoint`
+or `~/.codex/harness/hooks/checkpoint`; from this checkout it is
+`hooks/checkpoint`. Supply JSON yourself:
+
+```bash
+python3 hooks/checkpoint/usage_cli.py declare TASK_ID --file declaration.json
+python3 hooks/checkpoint/usage_cli.py record TASK_ID --file event.json
+python3 hooks/checkpoint/usage_cli.py report
+python3 hooks/checkpoint/usage_cli.py report TASK_ID
+```
+
+`--file -` reads JSON from standard input. A declaration is
+`{"host":"claude","expected_event_ids":["event_1"],"outcome":"returned"}`.
+A record is `{"adapter":"claude-message","context":{"event_id":"event_1","attempt_id":"attempt_1","stage":"worker","outcome":"returned"},"payload":{"type":"assistant","message":{"usage":{"input_tokens":5,"output_tokens":3}}}}`.
+Adapters are `claude-message`, `codex-turn`, `codex-cumulative`, and `missing`;
+the last takes an empty payload. The declaration's expected IDs may be `null`
+when the inventory is unknown. Use a stable host event ID or export ordinal,
+and submit finalized observations only. These identities and outcomes are
+supplied by the caller, not verified by Harness.
+
+This command reads only supplied JSON and stores selected counts in the private
+`$XDG_STATE_HOME/claude-harness/usage/` directory, falling back to
+`$HOME/.local/state/claude-harness/usage/` when XDG_STATE_HOME is unset or
+relative. Reports cover all persisted observations, including failed attempts,
+abandonment, and judge work. Missing usage and unknown inventories remain
+incomplete; independently accepted tasks and tokens per accepted task remain
+unverified and unavailable. The reported cost is unavailable. This offline
+ledger is separate from the live occupancy, spend, and statusline displays.
 
 ### Host limits
 
@@ -463,7 +532,9 @@ Keep durable project facts in `STATE.md`; avoid credentials, transcripts, and
 private environment values. Read the `checkpoint` skill for checkpoint and compaction
 rules. The project-handoff helper reports Git state without changing the tree.
 
-The shell guard recognizes known command patterns. It is a seatbelt, not a
+The shell guard inspects local shell tool payloads on Claude Code and Codex. It
+does not inspect arbitrary MCP tools, remote commands sent as quoted text to
+`ssh`, or PowerShell syntax. The shell guard recognizes known command patterns. It is a seatbelt, not a
 sandbox or a substitute for host permissions. It still passes shell code it
 cannot read as text: code spelled with `echo -e` escapes, printf octal escapes
 such as `\174`, or a here-string built from printf output. It also does not
@@ -480,6 +551,22 @@ files. It runs `prettier --write` for JavaScript, TypeScript, JSON, CSS, SCSS,
 HTML, Markdown, and YAML. Formatters can load repository configuration, execute
 plugins, and change files. The hook performs no downloads and invokes no package
 runner. Unset the variable, or set any value other than `1`, to disable it.
+
+## Operations and observation
+
+Version 0.4.0 includes these opt-in features. An operations brief describes a service
+target, allowed action, proof and readback without requiring a Git worktree. The preflight reports declared missing
+tools before dispatch; it preserves the user's named agent and its configuration.
+A separate report-only observer compares supplied resulting-state proof and never
+replays or repairs a mutation. See [operations and observation](docs/operations.md)
+for the exact profile, commands, coordinator recipe and enforcement boundaries.
+
+## Offline evaluation
+
+The [offline evaluator](docs/evaluation.md) checks supplied paired experiment
+records against a frozen rubric and control manifest. It retains failed attempts,
+missing usage and independent-check evidence. Its result is conservative screening,
+not automatic acceptance, live-host verification or an optimization claim.
 
 ## Test
 

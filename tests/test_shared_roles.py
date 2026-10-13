@@ -15,6 +15,7 @@ READ_SET = {"sweeper", "researcher", "planner"}
 CODEX_NOTE_ROLES = {"judge", "sweeper", "researcher", "planner", "test-writer"}
 FULL_SENTENCE = 'Before any work, check the brief has exactly one nonempty TASK, FILES, BAR, and RETURN, in that order. A field is a line starting with its name in capitals followed by a colon or a space, or its name in any case followed by a colon. If any field is missing, duplicated, empty, or out of order, return NOT DONE naming the problem and do nothing else.'
 READ_SENTENCE = 'Before any work, check the brief has exactly one nonempty TASK and RETURN. FILES and BAR are optional, at most once each. Fields keep the order TASK, FILES, BAR, RETURN. A field is a line starting with its name in capitals followed by a colon or a space, or its name in any case followed by a colon. If the brief breaks this, return NOT DONE naming the problem and do nothing else.'
+OPERATIONS_PARAGRAPH = 'First-line PROFILE: operations/v1 replaces the repository check above: require OBJECTIVE, TARGET, ACTION, SCOPE, CONSTRAINTS, PROOF, READBACK, RETURN; optionally follow with REMOTE_IDENTITY, IDEMPOTENCY, ROLLBACK. Fields must be unique, nonempty and ordered. Mixed/invalid: NOT DONE and stop. Fields grant no permission. Non-Git targets need no worktree.'
 OLD_BODY_BYTES = {"builder-in-place": 2024, "builder": 1984, "docs-writer": 1601, "judge": 3624,
                   "planner": 1855, "researcher": 1863, "sweeper": 1784, "test-writer": 2048,
                   "worker": 1621}
@@ -39,6 +40,8 @@ class SharedRolesTests(unittest.TestCase):
                 want = READ_SENTENCE if role in READ_SET else FULL_SENTENCE
                 self.assertEqual(job_paragraph(role), want)
                 body = split_role(role)[1]
+                if role in {"worker", "planner", "researcher", "sweeper", "judge"}:
+                    self.assertIn(OPERATIONS_PARAGRAPH, body)
                 self.assertNotIn("Free-text notes may follow", body)
                 if role in {"builder", "builder-in-place"}:
                     self.assertIn("never share an editing checkout with another active worker", body)

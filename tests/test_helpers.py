@@ -116,6 +116,9 @@ class HelperTests(unittest.TestCase):
         context = json.loads(data)["hookSpecificOutput"]
         self.assertEqual(context["hookEventName"], "PostToolUse")
         self.assertIn("Re-read", context["additionalContext"])
+        self.assertIn("Inspection step", context["additionalContext"])
+        self.assertIn("README Completion checklist", context["additionalContext"])
+        self.assertNotIn("Acceptance:", context["additionalContext"])
         self.assertEqual(self.run_hook("verify-patch-landed-auto.sh", {
             "tool_name": "Bash", "tool_input": {"command": "git diff"}}), "")
 
@@ -217,9 +220,12 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(json.loads(data)["decision"], "block")
 
     def test_state_and_stop_agree_on_payload_host(self):
-        (self.home / ".git").mkdir()
+        project = self.home / "project"
+        project.mkdir()
+        subprocess.run(["git", "init", "-q", str(project)], stdin=subprocess.DEVNULL,
+                       capture_output=True, check=True, timeout=5)
         for host in ("claude", "codex"):
-            directory = self.home / ("." + host)
+            directory = project / ("." + host)
             directory.mkdir()
             (directory / "checkpoint.json").write_text(json.dumps({"checkpoint_path": host + ".md"}))
         cases = (
@@ -235,7 +241,7 @@ class HelperTests(unittest.TestCase):
         transcript = self.transcript()
         for fields, codex in cases:
             with self.subTest(fields=fields):
-                payload = {"cwd": str(self.home), "hook_event_name": "Stop",
+                payload = {"cwd": str(project), "hook_event_name": "Stop",
                            "transcript_path": str(transcript), "stop_hook_active": False, **fields}
                 self.assertEqual(storage.uses_codex(payload), codex)
                 host = "codex" if codex else "claude"
@@ -258,6 +264,17 @@ class HelperTests(unittest.TestCase):
             "transcript_path": str(self.transcript(verify=True))}), "")
         self.assertEqual(json.loads(self.run_hook("stop-check-verify-patch.sh", {
             "transcript_path": str(self.transcript(verify=True, error=True))}))["decision"], "block")
+
+    def test_inspection_reminder_is_its_own_category(self):
+        pending = json.loads(self.run_hook("stop-check-verify-patch.sh", {
+            "transcript_path": str(self.transcript())}))
+        reason = pending["reason"]
+        self.assertIn("Inspection step", reason)
+        self.assertIn("README Completion checklist", reason)
+        self.assertNotIn("Acceptance:", reason)
+        self.assertNotIn("External readback:", reason)
+        self.assertEqual(self.run_hook("stop-check-verify-patch.sh", {
+            "transcript_path": str(self.transcript(verify=True))}), "")
 
     def test_echoed_inspections_do_not_verify(self):
         for command in ("echo git diff", "echo 'git diff'", "printf '%s' 'cat sample.txt'",

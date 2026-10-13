@@ -3,39 +3,17 @@
 import json
 import os
 from pathlib import Path
-import re
 import uuid
 
+from project_root import contained_file, project_root, valid_pin
+from state_excerpt import READ_LIMIT, read_state, state_excerpt
 from storage import (conversation_tag, fingerprint, guarded_read, json_object,
                      local_cache, object_value, quantity, replace_private,
                      rollout_window, uses_codex, utf8_prefix)
 
 
 def project_anchor(event):
-    candidate = (event.get("cwd") or event.get("project_dir")
-                 or object_value(event.get("workspace")).get("current_dir")
-                 or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
-    if not isinstance(candidate, str):
-        return None
-    current = Path(candidate).resolve()
-    if not current.is_dir():
-        return None
-    for directory in (current, *current.parents):
-        if (directory / ".git").exists():
-            return directory
-    return None if current == Path.home().resolve() else current
-
-
-def contained_file(base, relative):
-    if not isinstance(relative, str) or not relative or len(relative.encode()) > 512:
-        return None
-    part = Path(relative)
-    if part.is_absolute() or ".." in part.parts:
-        return None
-    candidate = base / part
-    if candidate.is_symlink() or any(p.is_symlink() for p in candidate.parents if p != base.parent):
-        return None
-    return candidate if candidate.resolve().is_relative_to(base.resolve()) else None
+    return project_root(event)[0]
 
 
 def preferences(event, base=None):
@@ -45,7 +23,9 @@ def preferences(event, base=None):
     sources = [Path(__file__).with_name("policy.json")]
     base = base or project_anchor(event)
     if base:
-        sources.append(base / (".codex" if uses_codex(event) else ".claude") / "checkpoint.json")
+        config = contained_file(base, (".codex" if uses_codex(event) else ".claude") + "/checkpoint.json")
+        if config is not None:
+            sources.append(config)
     result = dict(defaults)
     for source in sources:
         for key, value in json_object(source).items():
@@ -105,18 +85,24 @@ class Notebook:
         self.receipt = self.directory / "cursor.json"
         self.cursor = json_object(self.receipt) if self.identity else {}
         self.anchor = project_anchor(event)
-        self.options = preferences(event, self.anchor)
         self.document = None
         binding = object_value(self.cursor.get("binding"))
-        if isinstance(binding.get("directory"), str):
-            base = Path(binding["directory"])
-            if base.is_absolute():
-                self.document = contained_file(base, binding.get("document"))
-                if self.document:
-                    self.anchor = base
-                    self.options = preferences(event, base)
+        old = binding.get("directory")
+        draft = self.directory / "draft"
+        pinned = valid_pin(old)
+        if old == str(draft):
+            pinned = draft
+        if self.anchor is not None and pinned is not None and self.anchor != pinned:
+            self.cursor.pop("notice", None)
+            self.cursor.pop("usage", None)
+        elif self.anchor is None and pinned is not None:
+            self.anchor = pinned
+        if self.anchor == pinned:
+            self.document = contained_file(self.anchor, binding.get("document"))
         if self.document is None:
-            self.anchor = self.anchor or self.directory / "draft"
+            self.anchor = self.anchor or draft
+        self.options = preferences(event, self.anchor)
+        if self.document is None:
             self.document = contained_file(self.anchor, self.options["checkpoint_path"])
         if self.document is None:
             # Keep the path visible, but guarded reads will reject unsafe links.
@@ -134,7 +120,7 @@ class Notebook:
     def content(self):
         if contained_file(self.anchor, str(self.document.relative_to(self.anchor))) is None:
             return None, False
-        return guarded_read(self.document, 1024 * 1024)
+        return guarded_read(self.document, READ_LIMIT)
 
     def check(self):
         from storage import occupied_tokens
@@ -195,7 +181,8 @@ class Notebook:
         self.cursor.pop("notice", None)
         self.cursor.pop("usage", None)
         self.persist()
-        raw, complete = self.content()
+        safe = contained_file(self.anchor, str(self.document.relative_to(self.anchor)))
+        raw, complete = read_state(self.document) if safe is not None else (None, False)
         cap = self.options["restore_bytes"]
         path = utf8_prefix(str(self.document), min(300, cap // 6))
         lead = f"Checkpoint reference: {path}\nUse this saved record to resume; reconcile it with the latest request.\n\n"
@@ -203,58 +190,13 @@ class Notebook:
         lead += free_facts(self.anchor, self.document)
         if raw is None:
             return utf8_prefix(lead + "No readable checkpoint exists. Establish the next step before proceeding.", cap)
-        body = raw.decode("utf-8", errors="replace")
-        sections = [part for part in re.split(r"(?im)(?=^## )", body) if part.strip()]
-        preamble = []
-        if sections and not sections[0].startswith("## "):
-            preamble = [sections.pop(0)]
-        def heading(part):
-            first = part.splitlines()[0]
-            return first[3:].strip().casefold() if first.startswith("## ") else ""
-        priorities = [name.casefold() for name in self.options["restore_order"]]
-        indices = []
-        for name in priorities:
-            indices.extend(index for index, part in enumerate(sections)
-                           if heading(part) == name and index not in indices)
-        indices.extend(index for index in range(len(sections)) if index not in indices)
-        ordered = preamble + [sections[index] for index in indices]
-        body = "\n\n".join(part.rstrip("\n") for part in ordered) + "\n" if ordered else ""
-        if complete and len((lead + body).encode()) <= cap:
-            return lead + body
         tail = f"\n[Excerpt only. Read the complete checkpoint at {path}.]\n"
-        budget = cap - len((lead + tail).encode())
-        headers = [part.split("\n", 1)[0] + "\n" if part.startswith("## ") else ""
-                   for part in ordered]
-        content_budget = max(0, budget - sum(len(h.encode()) for h in headers)
-                             - 2 * max(0, len(ordered) - 1))
-        share = content_budget // max(1, len(ordered))
-        pieces = []
-        for number, (part, header) in enumerate(zip(ordered, headers)):
-            content = part[len(header):]
-            if len(content.encode()) <= share:
-                excerpt = content
-            elif preamble and number == 0:
-                excerpt = ""
-                for line in content.splitlines(keepends=True):
-                    if len((excerpt + line).encode()) > share:
-                        break
-                    excerpt += line
-                if not excerpt:
-                    excerpt = utf8_prefix(content, share)
-            else:
-                lines = content.splitlines(keepends=True)
-                while lines and not lines[-1].strip():
-                    lines.pop()
-                newest = []
-                remaining = share
-                for line in reversed(lines):
-                    if len(line.encode()) > remaining:
-                        break
-                    newest.append(line)
-                    remaining -= len(line.encode())
-                excerpt = "".join(reversed(newest))
-                if not excerpt and lines and share >= 2:
-                    kept = lines[-1].rstrip("\r\n").encode()[-(share - 1):]
-                    excerpt = kept.decode("utf-8", "ignore") + "\n"
-            pieces.append((header + excerpt).rstrip("\n"))
-        return utf8_prefix(lead + "\n\n".join(pieces), cap - len(tail.encode())) + tail
+        full_budget = cap - len(lead.encode())
+        # Reserve the notice before formatting, then omit it when everything fits.
+        body, truncated = state_excerpt(raw, complete, full_budget,
+                                        self.options["restore_order"])
+        if not truncated:
+            return lead + body
+        body, _ = state_excerpt(raw, complete, full_budget - len(tail.encode()),
+                                self.options["restore_order"])
+        return lead + body + tail

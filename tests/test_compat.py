@@ -337,7 +337,9 @@ class OutputIsUtf8(unittest.TestCase):
         with TemporaryDirectory() as temp:
             base = Path(temp).resolve()
             project = base / "project"
-            (project / ".git").mkdir(parents=True)
+            project.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(project)], stdin=subprocess.DEVNULL,
+                           capture_output=True, check=True, timeout=5)
             (project / "STATE.md").write_bytes(("## Next move\n" + "界" * 40 + "\n").encode("utf-8"))
             # A Windows pipe uses the ANSI code page (cp1252), which has no CJK characters.
             env = dict(os.environ, HOME=str(base), XDG_STATE_HOME=str(base / "state"), PYTHONIOENCODING="cp1252")

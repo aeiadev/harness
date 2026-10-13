@@ -25,6 +25,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_LINE = ".".join((ROOT / "VERSION").read_text().strip().split(".")[:2])
 sys.path.insert(0, str(ROOT / "tests"))
 from _platform import (BASH, IS_WINDOWS, home_env, posix, posix_modes, python_shim,  # noqa: E402
                        skip_unless_posix_modes)
@@ -32,7 +33,7 @@ HOSTS = ("claude", "codex")
 SETTINGS = {"claude": "settings.json", "codex": "hooks.json"}
 ROLES = ("sweeper", "researcher", "planner", "builder", "builder-in-place",
          "judge", "worker", "test-writer", "docs-writer")
-SKEW = "shared roles come from Router 0.2.0 or earlier; upgrade it for the 0.3 roles"
+SKEW = f"shared roles come from Router 0.2.0 or earlier; upgrade it for the {RELEASE_LINE} roles"
 HAND_FORMATTED = (b'{\n\t"zeta":   1,\n\t"alpha": [1,2, 3],\n\t"hooks": {"Stop": []},\n'
                   b'\t"note": "tabs, key order, no trailing newline"\n}')
 EXTRAS = {"claude": ("agents/Explore.md", "agents/Plan.md", "agents/general-purpose.md"),

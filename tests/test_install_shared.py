@@ -191,7 +191,7 @@ class SharedInstallTests(unittest.TestCase):
                     before = {name: (top / name).read_bytes() for name in self.role_paths(host)}
                     output = self.run_install(host)
                     version = "0.2.0 or earlier" if case == "older" else VERSION
-                    self.assertEqual(output, f"shared roles come from Router {version}; upgrade it for the 0.3 roles\n"
+                    self.assertEqual(output, f"shared roles come from Router {version}; upgrade it for the {'.'.join(VERSION.split('.')[:2])} roles\n"
                                              f"Installing 0 files into {top}.\n" + DONE[host])
                     files = json.loads((top / "harness/install-manifest.json").read_text())["files"]
                     for name, data in before.items():

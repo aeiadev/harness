@@ -49,9 +49,12 @@ parser.add_argument("--host", choices=("claude", "codex", "both"), help="install
 parser.add_argument("--judge-permissions", action="store_true", help="merge the optional Codex judge session profile into config.toml")
 parser.add_argument("--purge", action="store_true", help="remove Harness's own backups (after --uninstall when both are given)")
 parser.add_argument("--status", action="store_true", help="report installed Harness state without writing")
+parser.add_argument("--host-version", help="offline host version for --status (requires one explicit --host)")
 args = parser.parse_args()
 if args.status and (args.uninstall or args.purge or args.dry_run or args.judge_permissions):
     parser.error("--status cannot be combined with --uninstall, --purge, --dry-run, or --judge-permissions")
+if args.host_version is not None and (not args.status or args.host not in ("claude", "codex")):
+    parser.error("--host-version requires --status and one explicit --host claude or codex")
 version_path = source / "VERSION"
 try:
     package_version = version_path.read_text(encoding="utf-8").strip()
@@ -946,7 +949,7 @@ def status():
                     break
         except OSError:
             pass
-    print(f"skew: shared roles come from Router {sibling_version}; upgrade it for the 0.3 roles" if skew else "skew: none")
+    print(f"skew: shared roles come from Router {sibling_version}; upgrade it for the {'.'.join(checkout.split('.')[:2])} roles" if skew else "skew: none")
     template = source / ("examples/settings.example.json" if host == "claude" else "codex/hooks.json")
     example, _, _ = status_json(template)
     try:
@@ -988,6 +991,21 @@ def status():
     print(status_budget())
     if host == "claude":
         status_plugins()
+    # Load the shipped local catalog; never fall back to a sibling package.
+    sys.path.insert(0, str(source / "hooks/checkpoint"))
+    try:
+        if not (source / "hooks/checkpoint/capabilities.py").is_file():
+            raise ImportError("local catalog unavailable")
+        import capabilities
+        report = capabilities.describe(host, args.host_version, package="harness")
+        rows = [f"{label}: {value}" for label, value in capabilities.render_rows(report)]
+    except Exception:
+        print("capability version: unavailable (local catalog missing or unreadable)")
+    else:
+        for row in rows:
+            print(row)
+    finally:
+        del sys.path[0]
 
 
 def main():
@@ -1246,7 +1264,7 @@ def main():
         writes.append((target, data, install_mode(mode)))
     if skew:
         version = sibling.get("package") if isinstance(sibling.get("package"), str) and sibling.get("package") else "0.2.0 or earlier"
-        print(f"shared roles come from Router {version}; upgrade it for the 0.3 roles")
+        print(f"shared roles come from Router {version}; upgrade it for the {'.'.join(package_version.split('.')[:2])} roles")
 
     # Upgrade cleanup: an old file this checkout no longer ships goes when it is unchanged.
     retired = []

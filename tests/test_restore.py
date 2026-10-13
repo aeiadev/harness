@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if os.name == "nt":  # Fixtures are LF UTF-8 on every platform, as a Linux or macOS checkout writes them.
@@ -36,7 +37,7 @@ class RestoreContract(unittest.TestCase):
         """Use a fresh project and state under base; the name sets the path length."""
         self.project = self.base / name / "project"
         self.project.mkdir(parents=True)
-        (self.project / ".git").mkdir()
+        self.environment["HARNESS_PROJECT_ROOT"] = str(self.project)
         self.document = self.project / "STATE.md"
         # State sits outside the long name so its deeper paths stay under Windows' 260 characters.
         self.environment["XDG_STATE_HOME"] = str(self.base / f"state-{name[:8]}{len(name)}")
@@ -73,6 +74,78 @@ class RestoreContract(unittest.TestCase):
         self.assertIn("newest proof", text)
         self.assertNotIn("old proof", text)
         self.assertIn("## Other", text)
+
+    def test_later_critical_sections_survive_oversized_early_paragraph(self):
+        self.document.write_text("## Status\n" + "old filler " * 2500 + "\n" +
+                                 "".join(f"## Note {number}\nold\n" for number in range(300)) +
+                                 "## Objective\nShip the current fix.\n"
+                                 "## Constraints\nKeep local changes.\n"
+                                 "## Next move\nRun the focused regression.\n"
+                                 "## Proof\nSee tests/test_restore.py.\n"
+                                 "## Failures\nOne unresolved failure remains.\n")
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                text = self.restore(host=host)
+                self.assertLessEqual(len(text.encode()), 4000)
+                for phrase in ("Run the focused regression.", "Ship the current fix.",
+                               "Keep local changes.", "tests/test_restore.py",
+                               "One unresolved failure remains."):
+                    self.assertIn(phrase, text)
+
+    def test_repeated_sections_do_not_crowd_out_current_facts(self):
+        self.document.write_text(
+            "## Status\n" + "old filler " * 2500 + "\n" +
+            "".join(f"## Objective\nOld objective {number}\n" for number in range(12)) +
+            "## Next move\nCURRENT NEXT ACTION\n"
+            "## Constraints\nPRESERVE USER WORK\n"
+            "## Proof\nCURRENT PROOF POINTER\n"
+            "## Failures\nUNRESOLVED FAILURE\n", encoding="utf-8")
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                text = self.restore(host=host)
+                self.assertLessEqual(len(text.encode()), 4000)
+                for phrase in ("CURRENT NEXT ACTION", "PRESERVE USER WORK",
+                               "CURRENT PROOF POINTER", "UNRESOLVED FAILURE",
+                               "Old objective 11"):
+                    self.assertIn(phrase, text)
+
+    def test_distinct_critical_sections_are_not_capped_as_old_notes(self):
+        names = ("Next move", "Next action", "Next step", "Objective", "Aligned",
+                 "Constraints", "Requirements", "In flight", "Failures",
+                 "Unresolved failures", "Blockers", "Tests", "Verification",
+                 "Proof", "Dead ends")
+        self.document.write_text("## Status\n" + "old filler " * 2500 + "\n" +
+                                 "".join(f"## {name}\nCritical fact {number}.\n"
+                                         for number, name in enumerate(names)))
+        text = self.restore()
+        self.assertLessEqual(len(text.encode()), 4000)
+        for number in range(len(names)):
+            self.assertIn(f"Critical fact {number}.", text)
+
+    def test_late_action_after_megabyte_paragraph(self):
+        self.document.write_text("## Status\n" + "界" * 400000 +
+                                 "\n## Next move\nRun the late check.\n", encoding="utf-8")
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                text = self.restore(host=host)
+                self.assertIn("Run the late check.", text)
+                self.assertNotIn("�", text)
+                self.assertLessEqual(len(text.encode()), 4000)
+
+    def test_excerpt_reader_limits_each_read(self):
+        sys.path.insert(0, str(ROOT / "hooks/checkpoint"))
+        import state_excerpt
+        self.document.write_text("## Status\n" + "x" * (2 * 1024 * 1024) +
+                                 "\n## Next move\nRun the late check.\n")
+        original = state_excerpt.guarded_read
+        with mock.patch.object(state_excerpt, "guarded_read", wraps=original) as read:
+            raw, complete = state_excerpt.read_state(self.document)
+        self.assertFalse(complete)
+        self.assertIn(b"Run the late check.", raw)
+        self.assertEqual(len(read.call_args_list), 2)
+        self.assertTrue(all(call.args[1] <= state_excerpt.READ_LIMIT // 2
+                            for call in read.call_args_list))
+        self.assertLessEqual(len(raw), state_excerpt.READ_LIMIT + 2)
 
     def shown_path(self, cap):
         return str(self.document).encode()[:min(300, cap // 6)].decode("utf-8", "ignore")
@@ -168,7 +241,7 @@ class RestoreContract(unittest.TestCase):
         # is sized from TMPDIR to about 190 bytes, under Windows' 260-character path limit.
         longest = max(1, 190 - len(os.fsencode(self.base / "project/STATE.md")))
         counts = []
-        for name in sorted(("short", "d" * 40, "d" * 120, "d" * longest), key=len):
+        for name in sorted({"short", "d" * 40, "d" * 120, "d" * longest}, key=len):
             with self.subTest(name_bytes=len(name)):
                 self.relocate(name)
                 self.policy(restore_bytes=1000)
@@ -222,7 +295,6 @@ class RestoreContract(unittest.TestCase):
         return result
 
     def test_git_facts_are_bounded_and_use_document_age(self):
-        (self.project / ".git").rmdir()
         self.git("init", "--quiet")
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "fixture" + chr(64) + "example.invalid")
@@ -243,7 +315,6 @@ class RestoreContract(unittest.TestCase):
         self.assertLess(text.index("Git: "), text.index("## Next move") if "## Next move" in text else len(text))
 
     def make_repo(self):
-        (self.project / ".git").rmdir()
         self.git("init", "--quiet")
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "fixture" + chr(64) + "example.invalid")
@@ -274,7 +345,6 @@ class RestoreContract(unittest.TestCase):
         self.assertRegex(lines[0], r"^Git: feature/x HEAD=[0-9a-f]{7,} dirty=1 STATE\.md age=[0-9]+[mhd]$")
 
     def test_repo_without_a_commit_has_no_facts_line(self):
-        (self.project / ".git").rmdir()
         self.git("init", "--quiet")
         self.assertEqual(self.facts_line(), [])
 

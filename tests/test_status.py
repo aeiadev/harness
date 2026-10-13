@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from test_install_upgrade import Base, ROOT, SETTINGS, sha, old_tree, EXTRAS
+from test_install_upgrade import Base, ROOT, RELEASE_LINE, SETTINGS, sha, old_tree, EXTRAS
 from _platform import BASH, posix, posix_modes, skip_unless_posix_modes
 
 
@@ -240,7 +240,8 @@ class StatusTests(Base):
         self.assertEqual(result.stderr, "")
         lines = status_rows(result)
         line(lines[0], f"Harness status ({host}): {self.host_home(host)}")
-        self.assertEqual(len(lines), 9, lines)
+        self.assertGreaterEqual(len(lines), 10, lines)
+        self.assertTrue(lines[9].startswith("capability "), lines)
         return lines
 
     def test_fresh_is_read_only(self):
@@ -355,7 +356,7 @@ class StatusTests(Base):
         state.mkdir(parents=True)
         state.chmod(0)
         rows = status_rows(self.status())
-        line(rows[-2], f"last hook write: unknown (.local/state/claude-harness/ not readable: {os.strerror(errno.EACCES)})")
+        line(rows[7], f"last hook write: unknown (.local/state/claude-harness/ not readable: {os.strerror(errno.EACCES)})")
         state.chmod(0o755)
 
     def test_hook_write_and_sibling(self):
@@ -366,7 +367,7 @@ class StatusTests(Base):
         file.write_text("{}")
         os.utime(file, (1000000000, 1000000000))
         rows = status_rows(self.status())
-        line(rows[-2], "last hook write: 2001-09-09T01:46:40Z (checkpoints/latest.json)")
+        line(rows[7], "last hook write: 2001-09-09T01:46:40Z (checkpoints/latest.json)")
         router = self.host_home("claude") / "router/install-manifest.json"
         router.parent.mkdir()
         router.write_text("{")
@@ -380,7 +381,7 @@ class StatusTests(Base):
         self.run_install("claude")
         rows = status_rows(self.status())
         self.assertEqual(sum(re.fullmatch(re.escape("sibling: Router 0.2.0 or earlier installed"), row) is not None for row in rows), 1)
-        self.assertEqual(sum(re.fullmatch(re.escape("skew: shared roles come from Router 0.2.0 or earlier; upgrade it for the 0.3 roles"), row) is not None for row in rows), 1)
+        self.assertEqual(sum(re.fullmatch(re.escape(f"skew: shared roles come from Router 0.2.0 or earlier; upgrade it for the {RELEASE_LINE} roles"), row) is not None for row in rows), 1)
 
     def test_version_and_hooks(self):
         self.run_install("claude")
@@ -410,14 +411,14 @@ class StatusTests(Base):
         self.assertEqual(direct.returncode, 0, direct.stderr)
         row = json.loads(direct.stdout)["trees"][0]
         ceilings = ceilings_of(script)
-        line(status_rows(self.status(tree=checkout))[-1], budget_line(row["label"], row["tokens"], ceilings))
+        line(status_rows(self.status(tree=checkout))[8], budget_line(row["label"], row["tokens"], ceilings))
         script.write_text(script.read_text().replace('"together": 900}', '"together": 900, "tree": 123}'))
         self.assertEqual(ceilings_of(script)["tree"], 123)
-        line(status_rows(self.status(tree=checkout))[-1], "budget: tree 0 tokens always-on (estimate, ceiling 123)")
+        line(status_rows(self.status(tree=checkout))[8], "budget: tree 0 tokens always-on (estimate, ceiling 123)")
         script.write_text(script.read_text().replace('"harness": 600', '"harness": 601'))
-        line(status_rows(self.status(tree=checkout))[-1], "budget: tree 0 tokens always-on (estimate, ceiling 123)")
+        line(status_rows(self.status(tree=checkout))[8], "budget: tree 0 tokens always-on (estimate, ceiling 123)")
         script.unlink()
-        line(status_rows(self.status(tree=checkout))[-1], "budget: unavailable (scripts/budget.py is missing)")
+        line(status_rows(self.status(tree=checkout))[8], "budget: unavailable (scripts/budget.py is missing)")
         for body in ("import sys; sys.exit(3)", "import sys; sys.exit('msg')",
                      "import os; print('partial', flush=True); os._exit(3)",
                      "import time; time.sleep(1)", "print('not json')"):
@@ -425,7 +426,7 @@ class StatusTests(Base):
             result = self.status(tree=checkout, env={"HARNESS_STATUS_BUDGET_TIMEOUT": "0.1"})
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stderr, "")
-            line(status_rows(result)[-1], "budget: unavailable (scripts/budget.py failed)")
+            line(status_rows(result)[8], "budget: unavailable (scripts/budget.py failed)")
 
     def test_old_leftovers(self):
         tree = old_tree("HARNESS_V02")

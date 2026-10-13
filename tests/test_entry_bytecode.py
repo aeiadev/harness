@@ -88,7 +88,8 @@ def written_bytecode(base, prefix):
     found = set(base.rglob("__pycache__"))
     if prefix is not None:
         for tree in {base, base.resolve()}:
-            found |= set((prefix / str(tree).lstrip(os.sep)).rglob("*.pyc"))
+            # CPython mirrors absolute source paths without their Windows drive.
+            found |= set((prefix / os.path.splitdrive(str(tree))[1].lstrip(os.sep)).rglob("*.pyc"))
     return found
 
 
