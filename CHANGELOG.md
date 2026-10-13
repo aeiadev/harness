@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+Pairs with Router 0.4.1.
+
+- Update Harness release metadata and pairing guidance to accompany the Router macOS test-fixture correction. Harness runtime behavior is unchanged.
+
 ## 0.4.0
 
 Pairs with Router 0.4.0.

@@ -52,7 +52,7 @@ the statusline shows the same line. On native Windows, Harness takes the home fr
 `HOME` before Windows Python's `USERPROFILE` lookup, so Git Bash, the hosts and
 Harness agree on it. Limits for each platform follow the installation steps.
 
-Download or clone the [Harness 0.4.0 release](https://github.com/aeiadev/harness/releases/tag/v0.4.0),
+Download or clone the [Harness 0.4.1 release](https://github.com/aeiadev/harness/releases/tag/v0.4.1),
 then run from its directory:
 
 ```bash
@@ -160,7 +160,7 @@ restore it. Verify behavior manually in a disposable host setup before relying o
 
 ### Platform limits
 
-Router 0.4.0 pairs with Harness 0.4.0. Native Windows support starts at 0.3.1.
+Router 0.4.1 pairs with Harness 0.4.1. Native Windows support starts at 0.3.1.
 
 - On native Windows, POSIX owner checks and file modes such as 0600 and 0700 are not enforced; use Windows account and folder permissions to control access. The file modes named elsewhere in this README apply to POSIX systems.
 - Harness installs regular files and creates no symbolic links, so it needs no symlink permission. Where symlinks are not allowed, Router installs copies instead, and its upgrade and uninstall handle those copies.

@@ -45,7 +45,7 @@ PYTHON_LOOKUP = (
     "the danger guard exits 2 so the command stays blocked, and the statusline shows the same line.")
 HOME_LINE = ("On native Windows, Harness takes the home from `HOME` before Windows Python's `USERPROFILE` lookup, "
              "so Git Bash, the hosts and Harness agree on it.")
-PAIRING = "Router 0.4.0 pairs with Harness 0.4.0. Native Windows support starts at 0.3.1."
+PAIRING = "Router 0.4.1 pairs with Harness 0.4.1. Native Windows support starts at 0.3.1."
 LIMITS = [
     "- On native Windows, POSIX owner checks and file modes such as 0600 and 0700 are not enforced; use Windows account "
     "and folder permissions to control access. The file modes named elsewhere in this README apply to POSIX systems.",
@@ -256,6 +256,10 @@ class Docs(unittest.TestCase):
         text = read("CHANGELOG.md")
         headings = re.findall(r"(?m)^## (\d+\.\d+\.\d+)$", text)
         self.assertEqual(headings[0], (ROOT / "VERSION").read_text().strip())
+        current = text.split("## 0.4.1\n", 1)[1].split("\n## 0.4.0", 1)[0]
+        self.assertEqual(current.strip().splitlines()[0], "Pairs with Router 0.4.1.")
+        self.assertIn("Router macOS test-fixture correction", current)
+        self.assertIn("Harness runtime behavior is unchanged", current)
         release = text.split("## 0.3.0\n", 1)[1].split("\n## 0.2.0", 1)[0]
         self.assertEqual(re.findall(r"(?m)^### (\w+)", release), ["Added", "Changed", "Fixed"])
         self.assertIn("Upgrade notes", release)
@@ -295,6 +299,9 @@ class Docs(unittest.TestCase):
     def test_platform_limits(self):
         limits = section(read("README.md"), "### Platform limits")
         self.assertIn(PAIRING, limits.splitlines())
+        self.assertIn("[Harness 0.4.1 release](https://github.com/aeiadev/harness/releases/tag/v0.4.1)", read("README.md"))
+        self.assertIn("From the 0.4.1 checkout", read("docs/operations.md"))
+        self.assertIn("From the 0.4.1 checkout", read("docs/evaluation.md"))
         self.assertEqual([line for line in limits.splitlines() if line.startswith("- ")], LIMITS)
         self.assertIn(TEST_NOTES, squash(section(read("README.md"), "## Test")))
         self.assertIn("python3 tests/run_all.py", section(read("README.md"), "## Test"))

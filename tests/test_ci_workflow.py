@@ -562,7 +562,7 @@ class SiblingRefTests(unittest.TestCase):
         self.assertEqual(done.stderr, "%s: router tag v0.3.1 (%s)\n" % (SCRIPT_NAME, tagged))
 
     def test_main_that_matches_or_leads(self):
-        for main, own in (("0.3.1", "0.3.1"), ("0.4.0", "0.3.1"), ("0.3.10", "0.3.9"), ("1.0.0", "0.9.9")):
+        for main, own in (("0.3.1", "0.3.1"), ("0.4.1", "0.4.1"), ("0.4.0", "0.3.1"), ("0.3.10", "0.3.9"), ("1.0.0", "0.9.9")):
             with self.subTest(main=main, own=own):
                 head = self.repo.commit(main)
                 if not self.repo.clone.exists():
