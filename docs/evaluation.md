@@ -1,5 +1,32 @@
 # Offline evaluation
 
+## Remote operations guard evidence
+
+The optional SSH/scp/rsync guard uses the existing shell hook. An explicit
+project binding selects report or enforce mode; a complete nonremote command
+keeps the prior silent result. Report mode permits a blocked or unknown remote
+invocation with a bounded warning. Enforce mode refuses it. An unreadable
+activation refuses relevant or incompletely scanned input. Existing local
+guard refusals retain precedence and their original text. The offline
+`ssh_operations_cli.py check --file PATH|-` prints a schema-1 decision; its
+`--policy` option is labelled an unbound preview and cannot activate a hook.
+
+`scripts/benchmark_operations_guard.py` records serial warm subprocess
+samples, output bytes, source-content SHA256 values and p50/p95 latency.
+Individual wall-time, child CPU and context-switch samples are retained to
+diagnose machine-load effects; CPU time does not replace the wall-time limits. The
+frozen p95 ceilings are 101.157858 ms for ordinary Claude and 111.935438 ms
+for ordinary Codex inputs. Timing is reported evidence, not a unit-test gate.
+Default catalog/instruction hashes and hook output parity are separate gates.
+The bytes/4 budget is an estimate, not measured billed tokens. No SSH client,
+remote server, model, or network call is involved in these offline checks.
+Native Windows policy activation is unsupported in the accepted H3 API;
+feature-off behavior retains its existing platform scope. Explicit unbound
+previews support bounded stdin and ordinary drive-path files on Windows.
+File input rejects device names, alternate streams, network namespaces and
+existing reparse components; these checks do not establish POSIX-equivalent
+protection against concurrent filesystem changes.
+
 This explicit command scores supplied, privacy-safe experiment records. It does
 not run a model, import private transcripts, change routing policy, or accept
 work automatically. An evaluator implementation and synthetic tests establish
@@ -20,7 +47,7 @@ No optimization is adopted automatically, even when screening succeeds.
 
 # Offline evaluator API (schema 1)
 
-From the 0.4.1 checkout, import `hooks/checkpoint/evaluation.py` with the checkpoint directory on `sys.path`; call `evaluate(data) -> dict`, raising `EvaluationError` for bounded invalid input. `verification_method(family, external_state=False, material=False) -> str` returns rubric advice only. No persistence, model call, host verification, or adoption side effect.
+From the matching 0.5.0 checkout, import `hooks/checkpoint/evaluation.py` with the checkpoint directory on `sys.path`; call `evaluate(data) -> dict`, raising `EvaluationError` for bounded invalid input. `verification_method(family, external_state=False, material=False) -> str` returns rubric advice only. No persistence, model call, host verification, or adoption side effect.
 
 Top level: exactly `manifest`, `runs`, `acceptance`. Manifest: `schema_version:1`, opaque `experiment_id`, `candidate_id`, nonnegative integer `seed`, `treatment` mapping changed control name to exact `{baseline,candidate}` values, `controls` containing exact `claude` and `codex` frozen baseline control objects, and `pairs` list. Each pair: opaque `pair_id`, `task_id`, family (`tinyanswer|singleedit|retryfix|fakeoperations`), SHA256 `prompt_digest`, SHA256 `rubric_hash`, `order` (`baseline-first|candidate-first`), integer `seed`.
 

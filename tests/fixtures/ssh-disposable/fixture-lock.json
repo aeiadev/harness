@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "base_image": "docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
+  "packages": {
+    "openssh-server": "1:9.6p1-3ubuntu13.20",
+    "openssh-client": "1:9.6p1-3ubuntu13.20",
+    "openssh-sftp-server": "1:9.6p1-3ubuntu13.20",
+    "rsync": "3.2.7-1ubuntu1.5",
+    "python3": "3.12.3-0ubuntu2.1"
+  },
+  "network": "none; clients and server run inside the same loopback-only container namespace",
+  "host_mounts": [],
+  "published_ports": [],
+  "credentials": "new fixture-only Ed25519 keys generated at startup and destroyed with container"
+}

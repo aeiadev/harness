@@ -85,6 +85,32 @@ class StandaloneCommands(unittest.TestCase):
         self.assertNotIn(b"DO_NOT_ECHO", bad.stdout + bad.stderr)
         self.assertEqual(list(self.home.iterdir()), [])
 
+    @unittest.skipIf(ROUTER, "the Harness commands entry")
+    def test_commands_entry_keeps_existing_schemas_in_a_copied_package(self):
+        (self.source / "bin").mkdir()
+        shutil.copy2(ROOT / "bin/harness-commands", self.source / "bin/harness-commands")
+        shutil.copy2(ROOT / "VERSION", self.source / "VERSION")
+        from test_evaluation import fixture
+        cases = (("operations", dict(brief=BRIEF, agent="custom-reader", required_tools=["connector.read"],
+                                     available_tools=[])),
+                 ("operations", dict(brief=BRIEF, agent="custom-reader", required_tools=["connector.read"],
+                                     available_tools=None)),
+                 ("observe", dict(expected=dict(schema_version=1, task_id="task", target_id="target",
+                                                revision_id="rev", requirements={"title": "a" * 64}),
+                                  observed=dict(schema_version=1, read_status="denied"))),
+                 ("evaluate", fixture()), ("evaluate", {"private": "DO_NOT_ECHO"}))
+        for name, value in cases:
+            with self.subTest(command=name):
+                direct = self.command(name, value)
+                args = [sys.executable, "-B", str(self.source / "bin/harness-commands"), name]
+                entry = run(args + (["check"] if name == "operations" else []) + ["--file", "-"],
+                            input=json.dumps(value).encode(), capture_output=True, env=self.env,
+                            cwd=self.work, timeout=15)
+                self.assertEqual((entry.returncode, entry.stdout, entry.stderr),
+                                 (direct.returncode, direct.stdout, direct.stderr))
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertEqual(list(self.work.iterdir()), [])
+
     def test_plugin_cores_match_standalone_source(self):
         for name in ("operations.py", "observation.py", "evaluation.py"):
             original = ROOT / "hooks" / HOOKS / name

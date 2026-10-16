@@ -486,6 +486,60 @@ class SharedInstallTests(unittest.TestCase):
                 self.run_install(host, "--uninstall")
                 self.assertEqual(checksum.read_bytes(), original + b"user edit\n")
 
+    def test_missing_guard_dependency_refuses_before_any_write(self):
+        import shutil
+        source = Path(self.temp.name + "-source")
+        self.addCleanup(shutil.rmtree, source, True)
+        shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", "plugins", "tests"))
+        claude = self.home / ".claude"
+        claude.mkdir()
+        (claude / "sentinel").write_bytes(b"unchanged")
+
+        def tree(root):
+            return sorted((str(path.relative_to(root)), "dir" if path.is_dir() else sha(path.read_bytes()))
+                          for path in root.rglob("*"))
+
+        before = tree(self.home)
+        env = {**os.environ, "HOME": str(self.home), "CLAUDE_HOME": str(claude),
+               "CODEX_HOME": str(self.home / ".codex"), "XDG_CONFIG_HOME": str(self.home / ".config"),
+               "XDG_STATE_HOME": str(self.home / ".state")}
+        for name in ("ssh_operations.py", "operations_policy.py", "shell_syntax.py",
+                     "wait-loop-guard.py", "danger_cmd_guard.py"):
+            for host in ("claude", "both"):
+                with self.subTest(missing=name, host=host):
+                    moved = source / "hooks/guard" / name
+                    aside = source / name
+                    moved.rename(aside)
+                    try:
+                        result = subprocess.run([BASH, posix(source / "install.sh"), "--host", host],
+                                                env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                                text=True, timeout=30)
+                    finally:
+                        aside.rename(moved)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"missing installation requirement: hooks/guard/{name}", result.stderr)
+                    self.assertEqual(tree(self.home), before)
+
+    def test_full_install_packages_guard_closure_but_not_the_commands_profile(self):
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                self.run_install(host)
+                top = self.home / f".{host}"
+                files = json.loads((top / "harness/install-manifest.json").read_text())["files"]
+                for name in ("danger_cmd_guard.py", "shell_syntax.py", "wait-loop-guard.py",
+                             "ssh_operations.py", "operations_policy.py"):
+                    self.assertIn(f"harness/hooks/guard/{name}", files)
+                    self.assertTrue((top / "harness/hooks/guard" / name).is_file())
+                # The full install mirrors hooks/ (an inert dispatcher included) but never
+                # creates the commands profile: no launcher, runtime, journal, state or hook.
+                self.assertFalse([name for name in files if "harness-commands" in name or name.startswith("bin/")])
+                settings = json.loads((top / ("settings.json" if host == "claude" else "hooks.json")).read_text())
+                self.assertNotIn("command_runtime", json.dumps(settings))
+                self.assertFalse((top / "harness-commands").exists())
+                self.assertFalse((self.home / ".local").exists())
+                self.assertFalse((self.home / ".state/harness-commands").exists())
+                self.assertFalse((self.home / ".state/harness-commands-installer").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

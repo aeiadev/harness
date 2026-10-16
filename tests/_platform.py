@@ -16,6 +16,7 @@ import ntpath
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,26 @@ import unittest
 
 IS_WINDOWS = os.name == "nt"
 POSIX_MODES = not IS_WINDOWS  # NTFS keeps only a read-only flag; chmod 0o700 reads back as 0o777
+
+
+def canonical_temp_root(temporary, windows=IS_WINDOWS):
+    """Canonical root for an ordinary TemporaryDirectory fixture (the object or the folder name its `with`
+    yields), while it still exists: no symlinked ancestor such as macOS /var, which the guards refuse.
+    On Windows a root with no symlink or junction in it keeps the spelling it was given: resolve() also
+    expands 8.3 short names (C:\\Users\\RUNNER~1 becomes C:\\Users\\runneradmin), and that longer root
+    pushed install fixtures past the installer's Windows path bound."""
+    given = Path(getattr(temporary, "name", temporary))
+    if windows:
+        given = Path(os.path.abspath(given))
+        if not any(_is_link(part) for part in (given, *given.parents)):
+            return given
+    return given.resolve(strict=True)
+
+
+def _is_link(path):
+    """True for a symlink or any other reparse point (a junction, say); raises when PATH is missing."""
+    info = os.lstat(path)
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
 
 
 def _under(path, folder):

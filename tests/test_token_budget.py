@@ -314,5 +314,22 @@ class Doubled(unittest.TestCase):
         self.assertEqual(json.loads(run("--json").stdout)["flags"], [])
 
 
+
+
+class DefaultCatalogParity050(unittest.TestCase):
+    def test_default_catalog_and_instructions_match_041(self):
+        # Optional runtime modules must not enlarge or rewrite normal-session
+        # instructions. Include paths so a new default role/skill also fails.
+        records = []
+        for folder in ("agents", "skills", "codex/agents"):
+            for path in (ROOT / folder).rglob("*"):
+                if path.is_file() and "__pycache__" not in path.parts:
+                    records.append((path.relative_to(ROOT).as_posix(),
+                                    hashlib.sha256(path.read_bytes()).hexdigest()))
+        actual = hashlib.sha256(json.dumps(sorted(records), separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(actual, "b6df285cd6fbe45a0159c32e117290efa2956bb6b579a4ec12979daa4ddd3e35",
+                         "Default catalog/instruction content differs from the pinned 0.4.1 baseline")
+
+
 if __name__ == "__main__":
     unittest.main()

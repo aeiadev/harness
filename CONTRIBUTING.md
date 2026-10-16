@@ -4,14 +4,14 @@ Run the whole suite with `python3 tests/run_all.py` (`python tests/run_all.py` i
 
 No test calls a model or the network; CI also checks out the sibling repository and builds the old release trees.
 
+The exception is opt-in: with `SSH_FIXTURE_REQUIRED=1` the real SSH tests start a local container, and preparing its pinned image needs a container engine and network access (see `tests/fixtures/ssh-disposable/README.md`). The default run skips them and records them as unrun.
+
 Python 3.9 or newer, standard library only.
 
 Keep a change small and add a test that fails without it.
 
 Run one test file with `python3 tests/test_x.py`.
-
 The upgrade and together tests need ROUTER_V01, ROUTER_V02, HARNESS_V01 and HARNESS_V02 set to trees of the published 0.1 and 0.2 commits; the Old release trees step in .github/workflows/ci.yml shows how.
-
 The release step edits README.md and CHANGELOG.md.
 
 ## Releasing

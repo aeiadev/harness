@@ -481,6 +481,34 @@ class UpgradeCleanupTests(Base):
                 for relative in EXTRAS[host]:
                     self.assertIn(f"Would remove no-longer-shipped: {relative}", output)
 
+    def test_upgrade_missing_guard_dependency_refuses_before_mutation(self):
+        """A source without the remote guard modules must not replace a working 0.1/0.2 install."""
+        current = self.root / "tree-current"
+        shutil.copytree(ROOT, current, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc",
+                                                                     "plugins", "tests"))
+        for name in ("HARNESS_V01", "HARNESS_V02"):
+            for missing in ("ssh_operations.py", "operations_policy.py"):
+                with self.subTest(tree=name, missing=missing):
+                    home = self.root / f"user-{name}-{missing}"
+                    home.mkdir()
+                    for host in HOSTS:
+                        self.run_tree(old_tree(name), host, home=home)
+                    before = self.tree_state(home)
+                    path = current / "hooks/guard" / missing
+                    data = path.read_bytes()
+                    path.unlink()
+                    try:
+                        for host in HOSTS + ("both",):
+                            result = self.run_tree(current, host, code=1, home=home)
+                            self.assertIn(f"missing installation requirement: hooks/guard/{missing}",
+                                          result.stderr)
+                            self.assertEqual(self.tree_state(home), before)
+                    finally:
+                        path.write_bytes(data)
+                    for host in HOSTS:
+                        self.run_tree(current, host, home=home)
+                        self.assertTrue((home / f".{host}/harness/hooks/guard" / missing).is_file())
+
 
 class OldInstallFolderTests(Base):
     """D-P1: a 0.1 or 0.2 manifest has no created_dirs, so its folders are those its files live in.

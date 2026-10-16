@@ -1,5 +1,6 @@
 """Pin the reader-facing 0.3.0 contract without network or user state."""
 
+import importlib.util
 import os
 import re
 import subprocess
@@ -38,14 +39,14 @@ PLATFORM_ROWS = [
 PYTHON_LOOKUP = (
     "The installer and every hook find Python through `hooks/pyrun.sh`: `HARNESS_PYTHON` when set, then the interpreter "
     "recorded in the Harness state folder, then `python3`, `python` and `py -3`. Only Python 3.9 or newer counts, and the "
-    "Microsoft Store `python3` stub is skipped. Hooks record the interpreter they find once that state folder exists; "
+    "Microsoft Store `python3` stub is skipped. A hook that finds Python records it there when it exits 0, once that state folder exists; "
     "`--dry-run` and `--status` write nothing. Without a usable Python, the installer stops with "
     "`harness: missing requirement: python3 (Python 3.9 or newer)`. A hook prints "
     "`harness: no Python 3.9 or newer found (python3, python, py -3); install one or set HARNESS_PYTHON` on stderr and exits 1, "
     "the danger guard exits 2 so the command stays blocked, and the statusline shows the same line.")
 HOME_LINE = ("On native Windows, Harness takes the home from `HOME` before Windows Python's `USERPROFILE` lookup, "
              "so Git Bash, the hosts and Harness agree on it.")
-PAIRING = "Router 0.4.1 pairs with Harness 0.4.1. Native Windows support starts at 0.3.1."
+PAIRING = "Router 0.5.0 pairs with Harness 0.5.0. Native Windows support starts at 0.3.1."
 LIMITS = [
     "- On native Windows, POSIX owner checks and file modes such as 0600 and 0700 are not enforced; use Windows account "
     "and folder permissions to control access. The file modes named elsewhere in this README apply to POSIX systems.",
@@ -221,6 +222,41 @@ class Docs(unittest.TestCase):
                 result = subprocess.run([BASH, posix(ROOT / "install.sh"), *command.split()[2:]], cwd=ROOT, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_custom_install_commands_profile(self):
+        text = squash(read("docs/custom-install.md"))
+        for phrase in ("bash install.sh --profile commands --host claude --dry-run > plan.json",
+                       "bash install.sh --profile commands --host claude --plan plan.json",
+                       "`--host both` is refused", "`~/.local/bin/claude-harness`", "`~/.local/bin/codex-harness`",
+                       "`~/.claude/harness-commands`", "`~/.codex/harness-commands`",
+                       "`$XDG_STATE_HOME/harness-commands/<host>`", "`HARNESS_COMMANDS_STATE`",
+                       "`$XDG_STATE_HOME/claude-harness`", "registers no hook",
+                       "never adopted", "byte-identical", "`scripts/commands_install.py`",
+                       "missing installation requirement", "does not establish live enforcement"):
+            self.assertIn(phrase, text)
+        match = re.search(r"Only ((?:`[a-z]+`(?:, | and ))+`[a-z]+`) are available", text)
+        self.assertIsNotNone(match)
+        spec = importlib.util.spec_from_file_location("docs_command_runtime", ROOT / "hooks/checkpoint/command_runtime.py")
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        self.assertEqual(re.findall(r"`([a-z]+)`", match.group(1)), list(runtime.COMMANDS + runtime.META))
+        self.assertNotIn("\u2014", read("docs/custom-install.md"))
+
+    def test_remote_policy_and_qualification_truth(self):
+        readme = squash(read("README.md"))
+        for phrase in ("Full Router and Harness suites ran natively on Linux, macOS and Windows with Python 3.9 and 3.13 (six cells), with 0 failures and every skip named and reviewed", "Windows skips the POSIX-only tests", "required SSH integration test ran on Linux only", "PyYAML parity tests ran on Linux with Python 3.9 and 3.13 with PyYAML installed", "Live-host and installed-runtime qualification, and paid model or connector pilots, have not been run",
+                       "off until an owner binds", "install never binds one", "registers no hook",
+                       "SSH_FIXTURE_REQUIRED=1", "[commands-only installation](docs/custom-install.md)"):
+            self.assertIn(phrase, readme)
+        self.assertNotIn("remote commands sent as quoted text to `ssh`", readme)
+        contributing = squash(read("CONTRIBUTING.md"))
+        self.assertIn("The exception is opt-in", contributing)
+        self.assertIn("SSH_FIXTURE_REQUIRED=1", contributing)
+        self.assertNotRegex(readme, r"(?i)coming (soon|next)")
+        version = (ROOT / "VERSION").read_text().strip()
+        self.assertEqual(version, "0.5.0")
+        for name in ("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "docs/ssh-policy.md", "docs/operations.md", "docs/evaluation.md"):
+            self.assertNotIn("\u2014", read(name), name)
+
     def test_reminder_thresholds_documented(self):
         config = squash(section(read("README.md"), "## Configuration"))
         first = re.search(r"```json\n(.*?)```", section(read("README.md"), "## Configuration"), re.S).group(1)
@@ -256,10 +292,15 @@ class Docs(unittest.TestCase):
         text = read("CHANGELOG.md")
         headings = re.findall(r"(?m)^## (\d+\.\d+\.\d+)$", text)
         self.assertEqual(headings[0], (ROOT / "VERSION").read_text().strip())
-        current = text.split("## 0.4.1\n", 1)[1].split("\n## 0.4.0", 1)[0]
-        self.assertEqual(current.strip().splitlines()[0], "Pairs with Router 0.4.1.")
-        self.assertIn("Router macOS test-fixture correction", current)
-        self.assertIn("Harness runtime behavior is unchanged", current)
+        current = text.split("## 0.5.0\n", 1)[1].split("\n## 0.4.1", 1)[0]
+        self.assertEqual(current.strip().splitlines()[0], "Pairs with Router 0.5.0.")
+        self.assertNotIn("tagged or published", current)
+        for phrase in ("Full Router and Harness suites ran natively on Linux, macOS and Windows with Python 3.9 and 3.13 (six cells), with 0 failures and every skip named and reviewed", "Windows skips the POSIX-only tests", "required SSH integration test ran on Linux only", "The PyYAML parity tests ran on Linux with Python 3.9 and 3.13 with PyYAML installed", "Live-host, installed-runtime and paid-pilot qualification have not been run",
+                       "`install.sh --profile commands`", "registers no hook", "`ssh check`"):
+            self.assertIn(phrase, current)
+        self.assertNotRegex(current, r"(?i)coming|next release|will add")
+        previous = text.split("## 0.4.1\n", 1)[1].split("\n## 0.4.0", 1)[0]
+        self.assertEqual(previous.strip().splitlines()[0], "Pairs with Router 0.4.1.")
         release = text.split("## 0.3.0\n", 1)[1].split("\n## 0.2.0", 1)[0]
         self.assertEqual(re.findall(r"(?m)^### (\w+)", release), ["Added", "Changed", "Fixed"])
         self.assertIn("Upgrade notes", release)
@@ -299,9 +340,12 @@ class Docs(unittest.TestCase):
     def test_platform_limits(self):
         limits = section(read("README.md"), "### Platform limits")
         self.assertIn(PAIRING, limits.splitlines())
-        self.assertIn("[Harness 0.4.1 release](https://github.com/aeiadev/harness/releases/tag/v0.4.1)", read("README.md"))
-        self.assertIn("From the 0.4.1 checkout", read("docs/operations.md"))
-        self.assertIn("From the 0.4.1 checkout", read("docs/evaluation.md"))
+        readme = squash(read("README.md"))
+        self.assertIn("Download or clone the [Harness 0.5.0 release](https://github.com/aeiadev/harness/releases/tag/v0.5.0), then run from its directory:", readme)
+        self.assertNotIn("tagged or published", readme)
+        self.assertNotIn("releases/tag/v0.4.1", readme)
+        self.assertIn("From the matching 0.5.0 checkout", read("docs/operations.md"))
+        self.assertIn("From the matching 0.5.0 checkout", read("docs/evaluation.md"))
         self.assertEqual([line for line in limits.splitlines() if line.startswith("- ")], LIMITS)
         self.assertIn(TEST_NOTES, squash(section(read("README.md"), "## Test")))
         self.assertIn("python3 tests/run_all.py", section(read("README.md"), "## Test"))

@@ -41,6 +41,114 @@ sys.path.insert(0, str(source / "hooks/checkpoint"))
 import compat  # noqa: E402  compat.home(): $HOME first; Windows Python's Path.home() reads USERPROFILE only
 del sys.path[0]
 POSIX_MODES = os.name != "nt"  # NTFS keeps no mode bits: chmod there only sets or clears read-only
+
+
+def commands_profile(argv):
+    """Opt-in commands-only profile: one explicit host, saved plans, the shared Router-owned helper."""
+    import importlib.util
+    profile_parser = argparse.ArgumentParser(prog="install.sh --profile commands",
+                                             description="Standalone Harness commands profile")
+    profile_parser.add_argument("--profile", required=True, choices=("commands",))
+    profile_parser.add_argument("--host", required=True, choices=("claude", "codex"))
+    profile_parser.add_argument("--dry-run", action="store_true", help="print a saved JSON plan; writes nothing")
+    profile_parser.add_argument("--plan", help="apply exactly this saved plan")
+    for action in ("status", "rollback", "recover", "uninstall"):
+        profile_parser.add_argument("--" + action, action="store_true")
+    profile_args = profile_parser.parse_args(argv)
+    chosen = [name for name in ("dry_run", "plan", "status", "rollback", "recover", "uninstall")
+              if getattr(profile_args, name)]
+    if len(chosen) != 1:
+        sys.exit("harness: choose one commands profile action")
+    try:
+        version = (source / "VERSION").read_text(encoding="utf-8").strip()
+        spec = importlib.util.spec_from_file_location("harness_command_inventory",
+                                                      source / "hooks/checkpoint/command_runtime.py")
+        inventory_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inventory_module)
+        runtime_files = tuple(inventory_module.RUNTIME_FILES)
+    except (OSError, UnicodeError, ImportError, SyntaxError, AttributeError, TypeError):
+        sys.exit("harness: commands profile runtime unavailable")
+    if not version:
+        sys.exit("harness: commands profile runtime unavailable")
+    helper_path = source / "scripts/commands_install.py"
+    helper = [sys.executable, "-B", str(helper_path)]
+    common = ["--product", "harness", "--host", profile_args.host, "--home", str(compat.home().absolute())]
+    host_home = os.environ.get(profile_args.host.upper() + "_HOME")
+    if host_home:
+        common += ["--host-home", str(Path(host_home).expanduser().absolute())]
+
+    def build_payload(payload):
+        # Only the fixed approved inventory is packaged: never a link, private or ignored file.
+        payload.chmod(0o700)
+        records = {}
+        for relative in runtime_files:
+            original = source / relative
+            if original.is_symlink() or not original.is_file():
+                raise ValueError(f"commands profile input unavailable: {relative}")
+            data = original.read_bytes()
+            target = payload / relative
+            for parent in reversed(target.relative_to(payload).parents):
+                if parent != Path(".") and not (payload / parent).is_dir():
+                    (payload / parent).mkdir(mode=0o700)
+                    (payload / parent).chmod(0o700)
+            target.write_bytes(data)
+            mode = 0o700 if relative == "bin/harness-commands" else 0o600
+            target.chmod(mode)
+            records[relative] = {"sha256": hashlib.sha256(data).hexdigest(), "mode": mode}
+        # The pin names the exact packaged bytes, so archives without .git are identified too.
+        revision = "sha256:" + hashlib.sha256(json.dumps(
+            {"version": version, "files": records}, sort_keys=True).encode()).hexdigest()
+        data = json.dumps({"host": profile_args.host, "version": version, "source_revision": revision},
+                          sort_keys=True).encode()
+        (payload / "profile.json").write_bytes(data)
+        (payload / "profile.json").chmod(0o600)
+        records["profile.json"] = {"sha256": hashlib.sha256(data).hexdigest(), "mode": 0o600}
+        (payload / "manifest.json").write_text(json.dumps(
+            {"schema_version": 1, "source_revision": revision, "files": records}, sort_keys=True))
+        (payload / "manifest.json").chmod(0o600)
+
+    payload = None
+    if profile_args.dry_run:
+        payload = Path(tempfile.mkdtemp(prefix="harness-commands-payload-"))
+        try:
+            build_payload(payload)
+        except (OSError, ValueError) as error:
+            shutil.rmtree(payload)
+            sys.exit(f"harness: {error}")
+        action, extra = "plan", ["--payload", str(payload)]
+    elif profile_args.plan:
+        # The helper checks the exact saved plan bytes and payload inventory before mutation.
+        saved = Path(profile_args.plan)
+        try:
+            spec = importlib.util.spec_from_file_location("harness_commands_installer", helper_path)
+            installer = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(installer)
+            planned = Path(installer.read_json(saved)["payload"])
+        except Exception:  # Any unreadable or unexpected plan stops before payload or HOME writes.
+            sys.exit("harness: invalid commands profile plan")
+        if (planned.parent != Path(tempfile.gettempdir())
+                or not planned.name.startswith("harness-commands-payload-") or planned.is_symlink()):
+            sys.exit("harness: commands profile payload path unavailable")
+        if not planned.exists():
+            planned.mkdir(mode=0o700)
+            try:
+                build_payload(planned)
+            except (OSError, ValueError) as error:
+                shutil.rmtree(planned)
+                sys.exit(f"harness: {error}")
+        action, extra = "apply", ["--payload", str(planned), "--plan", str(saved)]
+    else:
+        action, extra = chosen[0], []
+    try:
+        result = subprocess.run(helper + [action] + common + extra, check=False)
+    finally:
+        if payload is not None:
+            shutil.rmtree(payload)
+    sys.exit(result.returncode)
+
+
+if any(arg == "--profile" or arg.startswith("--profile=") for arg in sys.argv[1:]):
+    commands_profile(sys.argv[1:])
 parser = argparse.ArgumentParser(description="Install Harness roles, skills, and hooks.")
 parser.add_argument("--dry-run", action="store_true", help="show changes without writing files")
 parser.add_argument("--statusline", action="store_true", help="replace an existing statusLine")
@@ -1210,6 +1318,14 @@ def main():
     for relative in required_checkpoint_files:
         if not (source / relative).is_file():
             fail(f"missing installation requirement: {relative}")
+    # The shell guard loads its modules from beside itself; a missing one would block every
+    # hooked shell command, so each module the shipped guard names must exist before any write.
+    # (The hook template check above already requires the guard itself.)
+    guard = source / "hooks/guard/danger_cmd_guard.py"
+    guard_text = guard.read_text(encoding="utf-8", errors="replace") if guard.is_file() else ""
+    for name in ("shell_syntax.py", "wait-loop-guard.py", "ssh_operations.py", "operations_policy.py"):
+        if name[:-3] in guard_text and not (source / "hooks/guard" / name).is_file():
+            fail(f"missing installation requirement: hooks/guard/{name}")
     example = installed_example(example, host, home)
 
     payload = {}

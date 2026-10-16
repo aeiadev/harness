@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _platform  # noqa: E402
@@ -103,6 +104,73 @@ class HomeEnv(unittest.TestCase):
                          env=dict(os.environ, **home_env(folder)), capture_output=True, text=True,
                          stdin=subprocess.DEVNULL)
             self.assertEqual(result.stdout.strip(), folder)
+
+
+class CanonicalTempRoot(unittest.TestCase):
+    @_platform.skip_unless_symlinks("a TMPDIR reached through a symlinked ancestor, as macOS /var is")
+    def test_root_has_no_symlink_component_when_tmpdir_is_an_alias(self):
+        with tempfile.TemporaryDirectory() as parent:
+            real = Path(os.path.realpath(parent)) / "real"
+            real.mkdir()
+            alias = Path(parent) / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with patch.dict(os.environ, {"TMPDIR": str(alias)}), patch.object(tempfile, "tempdir", None):
+                temporary = tempfile.TemporaryDirectory(prefix="canonical-")
+            with temporary:
+                self.assertTrue(alias.is_symlink())
+                self.assertEqual(Path(temporary.name).parent, alias)
+                # The Windows branch must resolve a linked root too, so run it here as well.
+                for options in ({}, {"windows": False}, {"windows": True}):
+                    for given in (temporary, temporary.name):
+                        root = _platform.canonical_temp_root(given, **options)
+                        self.assertEqual(str(root), os.path.realpath(str(root)))
+                        self.assertEqual(str(root), os.path.realpath(temporary.name))
+                        self.assertTrue(root.is_dir())
+
+    def test_windows_root_without_links_keeps_its_short_spelling(self):
+        # Windows resolve() expands 8.3 short names (C:\Users\RUNNER~1 becomes C:\Users\runneradmin): the
+        # longer root pushed the install fixtures past the installer's Windows path bound on hosted CI.
+        def expand_short_names(path, strict=False):
+            return Path(str(path).replace("RUNNER~1", "runneradmin"))
+
+        with tempfile.TemporaryDirectory() as parent:
+            short = Path(os.path.realpath(parent)) / "RUNNER~1"
+            short.mkdir()
+            with patch.dict(os.environ, {"TMPDIR": str(short), "TEMP": str(short), "TMP": str(short)}), \
+                    patch.object(tempfile, "tempdir", None):
+                temporary = tempfile.TemporaryDirectory(prefix="canonical-")
+            with temporary, patch.object(Path, "resolve", expand_short_names):
+                self.assertGreater(len(str(Path(temporary.name).resolve())), len(temporary.name))
+                for given in (temporary, temporary.name):
+                    root = _platform.canonical_temp_root(given, windows=True)
+                    self.assertEqual(str(root), temporary.name)
+                    self.assertTrue(root.is_dir())
+
+    def test_native_windows_short_name_root_is_not_lengthened(self):
+        if not _platform.IS_WINDOWS:
+            print(f"SKIP {self.id()}: 8.3 short names exist only on Windows", file=sys.stderr, flush=True)
+            self.skipTest("8.3 short names exist only on Windows")
+        import ctypes
+        with tempfile.TemporaryDirectory() as parent:
+            folder = Path(parent) / "long-folder-name-with-a-short-alias"
+            folder.mkdir()
+            buffer = ctypes.create_unicode_buffer(32768)
+            ctypes.WinDLL("kernel32").GetShortPathNameW(str(folder), buffer, len(buffer))
+            short = buffer.value
+            if not short or len(short) >= len(str(folder)):
+                reason = "8.3 name creation is off on this volume"
+                print(f"SKIP {self.id()}: {reason}", file=sys.stderr, flush=True)
+                self.skipTest(reason)
+            with patch.dict(os.environ, {"TMPDIR": short, "TEMP": short, "TMP": short}), \
+                    patch.object(tempfile, "tempdir", None):
+                temporary = tempfile.TemporaryDirectory(prefix="canonical-")
+            with temporary:
+                self.assertTrue(temporary.name.startswith(short))
+                self.assertGreater(len(str(Path(temporary.name).resolve())), len(temporary.name))
+                for given in (temporary, temporary.name):
+                    root = _platform.canonical_temp_root(given)
+                    self.assertEqual(str(root), temporary.name)
+                    self.assertTrue(root.is_dir())
 
 
 class Timeout(unittest.TestCase):

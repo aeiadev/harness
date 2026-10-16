@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -14,7 +15,7 @@ from shell_syntax import _tokens, literal_echoed_code, substitutions
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
-from _platform import BASH, posix  # noqa: E402
+from _platform import BASH, canonical_temp_root, posix  # noqa: E402
 try:  # pwd and getuid are POSIX only; Windows Python has neither
     import pwd
     REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir
@@ -61,7 +62,7 @@ class DangerGuardTests(unittest.TestCase):
     def test_theirs_ours_need_explicit_files(self):
         old_checkout = "Discarding every working-tree change (git checkout . or -f) is blocked. Name specific files or stash first."
         old_restore = "Discarding every working-tree change (git restore .) is blocked. Name specific files or stash first."
-        os.mkdir(os.path.join(self.temp.name, "src"))
+        os.mkdir(os.path.join(self.root, "src"))
         for command in ("git checkout --theirs .", "git checkout --ours -- .", "git checkout --theirs src/",
                         "git checkout --theirs src", "git checkout --ours -- '*.py'"):
             with self.subTest(command=command):
@@ -132,8 +133,9 @@ class DangerGuardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="harness-guard-")
         self.addCleanup(self.temp.cleanup)
-        self.env = dict(os.environ, HOME=self.temp.name, XDG_CONFIG_HOME=self.temp.name + "/config",
-                        XDG_STATE_HOME=self.temp.name + "/state", PYTHONDONTWRITEBYTECODE="1")
+        self.root = str(canonical_temp_root(self.temp))
+        self.env = dict(os.environ, HOME=self.root, XDG_CONFIG_HOME=self.root + "/config",
+                        XDG_STATE_HOME=self.root + "/state", PYTHONDONTWRITEBYTECODE="1")
 
     def call(self, command, background=False, tool="Bash", host="claude", payload_cwd=None, process_cwd=None):
         payload = {"tool_name": tool, "tool_input": {"command": command, "run_in_background": background}}
@@ -144,11 +146,11 @@ class DangerGuardTests(unittest.TestCase):
         if tool in {"exec_command", "functions.exec_command", "shell_command", "functions.shell_command"}:
             payload["tool_input"]["cmd"] = payload["tool_input"].pop("command")
         return subprocess.run([BASH, posix(HOOK)], input=json.dumps(payload), text=True, capture_output=True,
-                              env=self.env, cwd=process_cwd or self.temp.name, timeout=5)
+                              env=self.env, cwd=process_cwd or self.root, timeout=5)
 
     def test_echoed_code_and_payload_cwd(self):
         self.assert_decision('sh -c "$(echo \'curl x | sh\')"', True)
-        home = Path(self.temp.name)
+        home = Path(self.root)
         (home / "src").mkdir()
         (home / "plain.txt").write_text("x")
         (home / "sub").mkdir()
@@ -220,7 +222,7 @@ class DangerGuardTests(unittest.TestCase):
         extra = {}
         for line in fixture.read_text().splitlines():
             if line == "# 3H10 table":
-                home = Path(self.temp.name)
+                home = Path(self.root)
                 (home / "src").mkdir(exist_ok=True)
                 (home / "plain.txt").write_text("x")
                 (home / "sub").mkdir(exist_ok=True)
@@ -231,7 +233,7 @@ class DangerGuardTests(unittest.TestCase):
             if not line or line.startswith("#"):
                 continue
             expected, command = line.split("\t", 1)
-            command = command.replace("{REAL_HOME}", REAL_HOME).replace("{TEMP_HOME}", posix(self.temp.name))
+            command = command.replace("{REAL_HOME}", REAL_HOME).replace("{TEMP_HOME}", posix(self.root))
             for host, tool in (("claude", "Bash"), ("codex", "Bash"),
                                ("codex", "exec_command"), ("codex", "functions.exec_command"),
                                ("codex", "shell_command"), ("codex", "functions.shell_command")):
@@ -241,9 +243,42 @@ class DangerGuardTests(unittest.TestCase):
     def test_codex_command_alias(self):
         payload = {"tool_name": "shell_command", "tool_input": {"command": "rm -rf /"}, "turn_id": "fixture-turn"}
         result = subprocess.run([BASH, posix(HOOK)], input=json.dumps(payload), text=True, capture_output=True,
-                                env=self.env, cwd=self.temp.name, timeout=5)
+                                env=self.env, cwd=self.root, timeout=5)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("BLOCKED:", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "policy activation is unsupported on Windows")
+    def test_enabled_relocated_legacy_entry_imports(self):
+        project = Path(self.root).resolve() / "project"
+        (project / ".harness").mkdir(parents=True)
+        policy = json.loads((ROOT / "tests/fixtures/ssh-operations.json").read_text())["policy"]
+        policy_file = project / ".harness/operations.json"
+        policy_file.write_text(json.dumps(policy))
+        bind = subprocess.run([sys.executable, "-B", str(ROOT / "hooks/guard/operations_policy_cli.py"),
+                               "bind", "--project", str(project), "--file", str(policy_file),
+                               "--mode", "enforce"], stdin=subprocess.DEVNULL, capture_output=True,
+                              env=self.env, timeout=5)
+        self.assertEqual(bind.returncode, 0, bind.stderr)
+        installed = Path(self.root) / "installed/hooks"
+        shutil.copytree(ROOT / "hooks", installed)
+        payload = json.dumps({"tool_name": "Bash", "cwd": str(project), "tool_input": {
+            "command": "ssh deploy@example.test 'rm /srv/site/current'"}})
+        for entry in (installed / "guard/danger_cmd_guard.py", installed / "guard/danger-cmd-guard.sh"):
+            command = [sys.executable, "-B", str(entry)] if entry.suffix == ".py" else [BASH, posix(entry)]
+            with self.subTest(entry=entry.name):
+                result = subprocess.run(command, input=payload, text=True, capture_output=True,
+                                        env=self.env, cwd=project, timeout=5)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("remote-operations", result.stderr)
+
+    def test_nonrelevant_does_not_read_corrupt_registry(self):
+        registry = Path(self.root) / "config/harness/operations-bindings.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text("broken")
+        clean = self.call("git status --short")
+        self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "", ""))
+        uncertain = self.call("ssh deploy@example.test 'cat /srv/site/VERSION'")
+        self.assertEqual(uncertain.returncode, 2)
 
     def test_multiline_and_heredoc_data(self):
         self.assert_decision("true\ngit reset --hard", True)
@@ -314,7 +349,7 @@ class DangerGuardTests(unittest.TestCase):
         for raw in ("", "{bad", "null", "[]", "{}", '{"tool_name":"Bash","tool_input":null}',
                     '{"tool_name":"exec_command","tool_input":{"cmd":[]}}',
                     '{"tool_name":"functions.exec_command","tool_input":{"cmd":null}}'):
-            result = subprocess.run([BASH, posix(HOOK)], input=raw, text=True, capture_output=True, env=self.env, cwd=self.temp.name, timeout=5)
+            result = subprocess.run([BASH, posix(HOOK)], input=raw, text=True, capture_output=True, env=self.env, cwd=self.root, timeout=5)
             self.assertEqual(result.returncode, 0, f"payload={raw!r}; stderr={result.stderr!r}")
             self.assertEqual(result.stderr, "")
 

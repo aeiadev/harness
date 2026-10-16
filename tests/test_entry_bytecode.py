@@ -168,6 +168,37 @@ class EntryBytecodeTests(unittest.TestCase):
             self.assertEqual(missing_bytecode_line(ROOT, configured_entries()), [])
             self.assertEqual(cache_leaks(base, entries - {Path("hooks/newhook/newhook.py")}), [])
 
+    def test_commands_entry_disables_bytecode_and_leaves_no_cache(self):
+        entry = Path("bin/harness-commands")
+        for path in (entry, Path("hooks/checkpoint/command_runtime.py")):
+            self.assertTrue(has_bytecode_line(ROOT, path), path)
+        with tempfile.TemporaryDirectory(prefix="harness-commands-bytecode-") as temp:
+            base = Path(temp)
+            for dirname in ("bin", "hooks"):
+                shutil.copytree(ROOT / dirname, base / dirname,
+                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            shutil.copy2(ROOT / "VERSION", base / "VERSION")
+            home = base / "home"
+            home.mkdir()
+            env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(base / "state"),
+                       XDG_CONFIG_HOME=str(base / "config"))
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env.pop("HARNESS_COMMANDS_STATE", None)
+            for prefix_name in (None, "Library/Caches/com.apple.python"):
+                if prefix_name:
+                    env["PYTHONPYCACHEPREFIX"] = str(home / prefix_name)
+                prefix = interpreter_prefix(env, base)
+                for args in (["status"], ["version"], ["operations", "check", "--file", "-"],
+                             ["observe", "--file", "-"], ["evaluate", "--file", "-"], ["usage", "report"],
+                             ["ssh", "check", "--file", "-"], ["policy", "show"]):
+                    with self.subTest(command=args, prefix=prefix_name):
+                        before = written_bytecode(base, prefix)
+                        result = subprocess.run([sys.executable, str(base / entry), *args], input="{}",
+                                                capture_output=True, text=True, env=env, cwd=base, timeout=15)
+                        self.assertNotIn("harness commands:", result.stderr)
+                        self.assertNotIn("Traceback", result.stderr)
+                        self.assertEqual(written_bytecode(base, prefix), before)
+
     def test_leak_is_found_when_the_interpreter_uses_a_pycache_prefix(self):
         apple = "Library/Caches/com.apple.python"
         self.assertEqual(run_no_cache_check(ROOT, apple), [])

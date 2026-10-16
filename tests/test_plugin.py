@@ -96,6 +96,27 @@ class Generated(Scratch):
         self.assertEqual(self.gen(repo, "--check").returncode, 0)
         self.assertIn("(0 written, 0 removed)", self.gen(repo).stdout)
 
+    def test_guard_closure_is_packaged_once_and_commands_profile_stays_out(self):
+        repo = self.copy_repo()
+        self.assertEqual(self.gen(repo).returncode, 0)
+        self.assertEqual(self.gen(repo, "--check").returncode, 0)
+        guard = repo / "plugins/harness/hooks/guard"
+        for name in ("danger_cmd_guard.py", "shell_syntax.py", "wait-loop-guard.py",
+                     "ssh_operations.py", "operations_policy.py"):
+            self.assertEqual((guard / name).read_bytes(), (ROOT / "hooks/guard" / name).read_bytes(), name)
+        generated = sorted(path.relative_to(repo / "plugins").as_posix()
+                           for path in (repo / "plugins").rglob("*") if path.is_file())
+        self.assertFalse([name for name in generated if "command_runtime" in name
+                          or "harness-commands" in name or "/bin/" in name], generated)
+        hooks = json.loads((repo / "plugins/harness/hooks/hooks.json").read_text())["hooks"]
+        entries = [(event, group.get("matcher"), hook["command"]) for event, groups in hooks.items()
+                   for group in groups for hook in group["hooks"]]
+        self.assertEqual(len(entries), len(set(entries)))
+        example = json.loads((ROOT / "examples/settings.example.json").read_text())["hooks"]
+        self.assertEqual(len(entries), sum(len(group["hooks"]) for groups in example.values() for group in groups))
+        roles = sorted(path.name for path in (repo / "plugins/shared-roles/agents").iterdir())
+        self.assertEqual(len(roles), 9)
+
     def test_skill_index_names_plugin_roles(self):
         line = ("When Harness is installed as a plugin, the shared roles are `shared-roles:<name>` "
                 "(for example `shared-roles:sweeper`).")

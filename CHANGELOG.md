@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+Pairs with Router 0.5.0.
+
+Full Router and Harness suites ran natively on Linux, macOS and Windows with Python 3.9 and 3.13 (six cells), with 0 failures and every skip named and reviewed.
+Windows skips the POSIX-only tests and, because 0.2 predates Windows support, the version-skew checks that uninstall the 0.2 tool first or expect a skew notice after a Harness 0.2 install.
+The macOS and Windows Python 3.9 cells skip the tests that run the 0.1 and 0.2 release installers, which need Python 3.10 or newer.
+The required SSH integration test ran on Linux only. The PyYAML parity tests ran on Linux with Python 3.9 and 3.13 with PyYAML installed.
+
+Live-host, installed-runtime and paid-pilot qualification have not been run.
+
+- Add an optional policy for literal `ssh`, `scp` and `rsync` invocations: a POSIX-style parser, an owner `policy bind|show|unbind` registry in `report` or `enforce` mode, and an offline `ssh check` preview. It is off until bound, and an `ALLOW` result covers only the inspected invocation.
+- Integrate that policy into the full shell guard after its existing local rules, with a dependency-unavailable refusal and a bounded warning or refusal message. Default roles, skills and instructions are unchanged.
+- Add an opt-in `install.sh --profile commands` installer for bespoke hosts: one explicit `claude` or `codex` host, saved dry-run plan then exact apply, an isolated launcher and state, rollback, recover and uninstall. It registers no hook and never adopts an existing launcher. The default full install is unchanged and now checks the new guard modules before any write.
+- Add a disposable SSH fixture that proves actual readback and server-side observer write denial; real tests run only when opted in. Native Windows policy binding is refused until qualified.
+- `pyrun.sh` saves the interpreter it found only after the script exits 0, so a rejected command or a missing script leaves no `python` cache; Python still replaces the launcher.
+- Fix tests on Windows; these are test-only changes.
+- Document the commands profile in `docs/custom-install.md` and the remote policy in `docs/ssh-policy.md`.
+
 ## 0.4.1
 
 Pairs with Router 0.4.1.

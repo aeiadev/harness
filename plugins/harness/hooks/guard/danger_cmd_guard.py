@@ -480,7 +480,55 @@ def main():
     if reason:
         print("[danger-cmd-guard] BLOCKED: " + reason, file=sys.stderr)
         return 2
-    return 0
+    # Classify original shell text before any registry or project-root access.
+    # The legacy shell tokenizer above is used only for its existing local rules.
+    def adjacent(name, api):
+        try:
+            path = Path(__file__).with_name(name + ".py")
+            module_spec = importlib.util.spec_from_file_location("harness_" + name, path)
+            module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(module)
+            return module if callable(getattr(module, api, None)) else None
+        except Exception:
+            # Only dependency loading is caught: missing, unreadable or corrupt
+            # source cannot establish safety. Never expose loader paths/content
+            # or borrow an ambient module. Existing local refusals already won.
+            return None
+
+    def unavailable():
+        print("[danger-cmd-guard] BLOCKED: remote-operations dependency-unavailable", file=sys.stderr)
+        return 2
+
+    remote = adjacent("ssh_operations", "inspect_remote")
+    if remote is None:
+        return unavailable()
+    preliminary = remote.inspect_remote(command, {}, cwd="")
+    if preliminary["applicability"] == "nonrelevant":
+        return 0
+    policy_module = adjacent("operations_policy", "resolve_binding")
+    if policy_module is None:
+        return unavailable()
+    native = payload.get("tool_input", {}) if isinstance(payload, dict) else {}
+    workdir = native.get("workdir") if host == "codex" and isinstance(native, dict) else None
+    lookup = workdir if isinstance(workdir, str) and os.path.isabs(workdir) and os.path.isdir(workdir) else None
+    if lookup is None:
+        lookup = compat.native_form(payload_cwd) if payload_cwd is not None else os.getcwd()
+    binding = policy_module.resolve_binding(lookup)
+    mode = binding["mode"]
+    if mode == "off":
+        return 0
+    if binding["error_id"]:
+        reason_id = binding["error_id"]
+    else:
+        decision = remote.inspect_remote(command, binding["policy"], cwd=lookup)
+        if decision["verdict"] == "ALLOW":
+            return 0
+        reason_id = decision["reason_id"]
+    if mode == "report":
+        print("[danger-cmd-guard] WARNING: remote-operations " + reason_id, file=sys.stderr)
+        return 0
+    print("[danger-cmd-guard] BLOCKED: remote-operations " + reason_id, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

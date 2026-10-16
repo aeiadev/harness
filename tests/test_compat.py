@@ -58,9 +58,15 @@ def banned_uses(source, filename="<fixture>"):
     return [f"{node.lineno}: {form}" for node, form in sorted(found, key=lambda item: item[0].lineno)]
 
 
+# The vendored Router-owned shared helper: its parity and native Windows behaviour are tested elsewhere.
+VENDORED_ROUTER_HELPER = Path("scripts/commands_install.py")
+
+
 def shipped_python(root=ROOT):
     for path in sorted(root.rglob("*.py")):
         relative = path.relative_to(root)
+        if relative == VENDORED_ROUTER_HELPER:
+            continue
         if relative.parts[0] in {"tests", ".git", "router"} or path.name == "compat.py" and relative.parent.name == "checkpoint":
             continue
         yield path

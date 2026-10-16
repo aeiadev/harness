@@ -48,6 +48,17 @@ DETACH = 'git -C router checkout -q --detach "$ref"'
 TOGETHER = "HARNESS_DIR=$PWD bash router/tests/together.sh"
 GITLEAKS = 'docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.18.4 detect --source . --no-banner'
 ACTIONS = {"actions/checkout@v4", "actions/setup-python@v5"}
+SSH_BASE = "docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55"
+SSH_SETUP = ("set -euo pipefail\n" + "podman pull " + SSH_BASE + "\n"
+             "python3 -B tests/fixtures/ssh-disposable/run.py --engine podman --build\n")
+SSH_RUN = "SSH_FIXTURE_REQUIRED=1 python3 -B tests/test_ssh_observation.py"
+SSH_JOB = {"runs-on": "ubuntu-latest", "timeout-minutes": 20,
+           "permissions": {"contents": "read"}, "steps": [
+               {"uses": "actions/checkout@v4"},
+               {"uses": "actions/setup-python@v5", "with": {"python-version": "3.13"}},
+               {"name": "Build pinned SSH fixture", "run": SSH_SETUP},
+               {"name": "Required SSH readback proof", "env": {"SSH_FIXTURE_ENGINE": "podman"},
+                "run": SSH_RUN}]}
 SECURITY = [
     "Only the latest release is supported.",
     "Report a vulnerability privately through GitHub\x27s private vulnerability reporting on this repository. If that is not available, open an issue that says a security report is waiting and leave the details out.",
@@ -62,7 +73,7 @@ CONTRIBUTING = [
 ]
 GIT_VALUE = r'''(?:"[^"]*"|'[^']*'|\S+)'''
 GIT_OPTIONS = r"(?:\s+(?:-[Cc]\s+" + GIT_VALUE + r"|--?[\w-]+(?:=" + GIT_VALUE + r")?))*"
-NETWORK_WORDS = (r"\b(?:pip3?|apt(?:-get)?|brew|curl|wget|npm|npx|docker)\b"
+NETWORK_WORDS = (r"\b(?:pip3?|apt(?:-get)?|brew|curl|wget|npm|npx|docker|podman)\b"
                  r"|\bgit" + GIT_OPTIONS + r"\s+(?:clone|fetch|pull|submodule\s+update|remote\s+update|ls-remote)\b")
 BANNED = r"\b(?:guarantee\w*|sla|within 24|within 48|always secure)\b"
 OPERATOR_END = re.compile(r"(==|!=|&&|\|\||!|<|>)$")
@@ -308,7 +319,7 @@ def problems(text):
     if env.get("ROUTER_PINNED_REF") != PINNED:
         errors.append("sibling ref variable")
     jobs = tree.get("jobs") or {}
-    if set(jobs) != {"test", "together", "secrets"}:
+    if set(jobs) != {"test", "together", "secrets", "ssh-integration"}:
         return errors + ["jobs"]
     test, together, secrets = (jobs[name] for name in ("test", "together", "secrets"))
     errors += matrix_problems("test", test)
@@ -341,12 +352,16 @@ def problems(text):
     if secrets != {"runs-on": "ubuntu-latest",
                    "steps": [{"uses": "actions/checkout@v4"}, {"name": "Gitleaks", "run": GITLEAKS}]}:
         errors.append("secrets")
+    if jobs["ssh-integration"] != SSH_JOB:
+        errors.append("required SSH integration")
     for job_name, script in runs(tree):
-        if re.search(NETWORK_WORDS, script) and not (job_name == "secrets" and script == GITLEAKS):
+        allowed_setup = ((job_name == "secrets" and script == GITLEAKS)
+                         or (job_name == "ssh-integration" and script == SSH_SETUP))
+        if re.search(NETWORK_WORDS, script) and not allowed_setup:
             errors.append("network use in " + job_name)
         if re.search(r"\bfor \w+ in [^;\n]*tests/", script):
             errors.append("test loop in " + job_name)
-        if re.search(r"(?m)(^|[\s;&|(])python3\b", script):
+        if re.search(r"(?m)(^|[\s;&|(])python3\b", script) and job_name != "ssh-integration":
             errors.append("python3 in " + job_name)
         for path in re.findall(r"(?<![\w/$])(?:tests|scripts|codex|agents)/[\w.*-]+(?:/[\w.*-]+)*", script):
             if "*" not in path and not (ROOT / path).exists():
@@ -478,7 +493,7 @@ class CIWorkflowTests(unittest.TestCase):
             ("run: " + TOGETHER, "run: bash router/tests/together.sh", ["together run"]),
             ("zricethezav/gitleaks:v8.18.4", "zricethezav/gitleaks", ["secrets", "network use in secrets"]),
             ("actions/setup-python@v5", "actions/setup-python@main",
-             ["setup-python in test", "setup-python in together", "action pin actions/setup-python@main"]),
+             ["setup-python in test", "setup-python in together", "required SSH integration", "action pin actions/setup-python@main"]),
             ("    runs-on: ${{ matrix.os }}", "    runs-on: ${{ matrix.os ", None),
             ("python tests/run_all.py", "python tests/run_every.py", ["run_all in test", "missing tests/run_every.py"]),
         )
@@ -492,6 +507,21 @@ class CIWorkflowTests(unittest.TestCase):
                     self.assertEqual(problems(changed), expected)
         extra = text.rstrip("\n") + "\n  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pip install x\n"
         self.assertEqual(problems(extra), ["jobs"])
+
+    def test_ssh_job_cannot_silently_skip_or_use_unpinned_fixture(self):
+        text = CI.read_text()
+        mutations = (
+            ("SSH_FIXTURE_REQUIRED=1", "SSH_FIXTURE_RUN=1"),
+            (SSH_BASE, "docker.io/library/ubuntu:latest"),
+            ("      - name: Required SSH readback proof", "      - if: false\n        name: Required SSH readback proof"),
+            ("  ssh-integration:\n", "  ssh-integration:\n    continue-on-error: true\n"),
+            (SSH_RUN, SSH_RUN + " || true"),
+            ("          SSH_FIXTURE_ENGINE: podman", "          SSH_FIXTURE_ENGINE: missing-engine"),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assertIn(old, text)
+                self.assertIn("required SSH integration", problems(text.replace(old, new)))
 
     def test_network_words_cover_git_forms(self):
         for command in ("git fetch", "git -C harness fetch", "git -c k=v pull", "git clone x",

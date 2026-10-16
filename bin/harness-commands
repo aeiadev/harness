@@ -1,0 +1,66 @@
+#!/bin/sh
+""":"
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+        exec "$candidate" -I -B "$0" "$@"
+    fi
+done
+if command -v py >/dev/null 2>&1 &&
+   py -3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    exec py -3 -I -B "$0" "$@"
+fi
+echo 'harness commands: Python 3.9 or newer unavailable' >&2
+exit 1
+":"""
+import sys
+sys.dont_write_bytecode = True
+
+# Restricted, relocatable Harness commands entry point. A refused name exits before any
+# project module, manifest or state is read; an installed runtime is verified byte for byte.
+import hashlib
+import json
+from pathlib import Path
+
+ALLOWED = ("operations", "observe", "usage", "evaluate", "ssh", "policy",
+           "status", "doctor", "help", "version")
+if len(sys.argv) > 1 and sys.argv[1] not in ALLOWED:
+    print("harness commands: command unavailable in commands-only profile", file=sys.stderr)
+    sys.exit(2)
+RUNTIME_FILES = (
+    "bin/harness-commands",
+    "hooks/checkpoint/command_runtime.py",
+    "hooks/checkpoint/compat.py",
+    "hooks/checkpoint/evaluation.py",
+    "hooks/checkpoint/evaluation_cli.py",
+    "hooks/checkpoint/observation.py",
+    "hooks/checkpoint/observation_cli.py",
+    "hooks/checkpoint/operations.py",
+    "hooks/checkpoint/operations_cli.py",
+    "hooks/checkpoint/usage.py",
+    "hooks/guard/operations_policy.py",
+    "hooks/guard/operations_policy_cli.py",
+    "hooks/guard/ssh_operations.py",
+    "hooks/guard/ssh_operations_cli.py",
+)
+root = Path(__file__).resolve().parent.parent
+try:
+    manifest_path = root / "manifest.json"
+    if manifest_path.exists() or manifest_path.is_symlink() or (root / "profile.json").exists():
+        inventory = json.loads(manifest_path.read_text(encoding="utf-8"))["files"]
+        if set(inventory) != set(RUNTIME_FILES) | {"profile.json"}:
+            raise ValueError("incomplete runtime inventory")
+        for name, record in inventory.items():
+            target = root / name
+            if (target.is_symlink() or not target.is_file()
+                    or hashlib.sha256(target.read_bytes()).hexdigest() != record["sha256"]):
+                raise ValueError("runtime drift")
+    elif any((root / name).is_symlink() or not (root / name).is_file() for name in RUNTIME_FILES):
+        raise ValueError("source runtime incomplete")
+except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+    print("harness commands: runtime unavailable", file=sys.stderr)
+    sys.exit(1)
+sys.path.insert(0, str(root / "hooks" / "checkpoint"))
+from command_runtime import main  # noqa: E402  verified above; never an ambient module
+
+sys.exit(main(sys.argv[1:], root=root))

@@ -1,0 +1,3 @@
+FROM docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod 755 /usr/sbin/policy-rc.d && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server=1:9.6p1-3ubuntu13.20 openssh-client=1:9.6p1-3ubuntu13.20 openssh-sftp-server=1:9.6p1-3ubuntu13.20 rsync=3.2.7-1ubuntu1.5 python3=3.12.3-0ubuntu2.1 && rm -f /etc/ssh/ssh_host_* && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/sh deploy && useradd -m -s /bin/sh observer && usermod -p '*' deploy && usermod -p '*' observer

@@ -35,7 +35,7 @@ Tool names must be exact. Set `available_tools` to `null` when visibility is
 unknown; an empty list means none are declared. A wildcard does not establish
 read-only authority or tool visibility.
 
-From the 0.4.1 checkout, run this complete synthetic preflight. It
+From the matching 0.5.0 checkout, run this complete synthetic preflight. It
 requests the custom agent `fixture-worker` unchanged and deliberately lacks a
 declared tool, so the command exits 3 without dispatching anything.
 
@@ -102,3 +102,37 @@ raw page contents, credentials, URLs or private paths into receipts.
 The shipped tests use an isolated fake service with separate worker and observer
 channels. They prove fixture write denial, not live SSH/MCP safety or host trust.
 The tools do not inspect arbitrary remote shell commands or connector mutations.
+
+## Remote operation policy (0.5.0, optional)
+
+The [SSH policy contract](ssh-policy.md) defines a bounded, optional project
+policy for literal SSH, SCP and rsync invocations, with a parser, an owner
+binding command and an offline `ssh check` preview. Remote guarding starts off.
+Once an owner binds a policy in `report` or `enforce` mode, the full Harness
+shell guard inspects only those literal invocations; existing local blocks
+still win, and no model call or network access is added. `ALLOW` means an
+inspected invocation matched a rule. It does not authenticate a server, prove
+remote effects, or cover arbitrary MCP tools, PowerShell or opaque scripts.
+Existing operations briefs and report-only observation do not activate this
+guard, and the commands-only profile registers no hook. Native Windows policy
+binding is refused until its path and ACL behavior is qualified.
+
+
+## Disposable SSH readback proof
+
+The [SSH fixture](../tests/fixtures/ssh-disposable/README.md) exercises actual
+OpenSSH, SFTP-backed SCP and rsync in a container with loopback networking only.
+It generates temporary worker and observer keys inside the container and reads
+no host SSH configuration or credentials. The worker uploads and renames a
+synthetic artifact; a separate observer reads the resulting bytes and is denied
+a write by server-side filesystem permissions. The tests compare matching,
+stale and mismatched reads, plus denied and unavailable reads. Observation
+reports never replay the mutation.
+
+The fixture README gives the pinned image preparation and mandatory Linux test
+command. The `ssh-integration` job fails when its fixture or implementation is
+unavailable. Ordinary portable runs explicitly skip this opt-in integration;
+a skipped run provides no SSH qualification. The fixture's standalone smoke
+report records actual client versions and `guard_qualified: false`. Parser and
+guard integration are covered by their own offline tests. None of these tests establishes
+production-server permissions, installed host interception or live MCP access.

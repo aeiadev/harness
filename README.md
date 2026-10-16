@@ -43,8 +43,8 @@ Hook scripts use Python's standard library and run locally.
 The installer and every hook find Python through `hooks/pyrun.sh`: `HARNESS_PYTHON`
 when set, then the interpreter recorded in the Harness state folder, then `python3`,
 `python` and `py -3`. Only Python 3.9 or newer counts, and the Microsoft Store
-`python3` stub is skipped. Hooks record the interpreter they find once that state
-folder exists; `--dry-run` and `--status` write nothing. Without a usable Python,
+`python3` stub is skipped. A hook that finds Python records it there when it exits
+0, once that state folder exists; `--dry-run` and `--status` write nothing. Without a usable Python,
 the installer stops with `harness: missing requirement: python3 (Python 3.9 or newer)`.
 A hook prints `harness: no Python 3.9 or newer found (python3, python, py -3); install one or set HARNESS_PYTHON`
 on stderr and exits 1, the danger guard exits 2 so the command stays blocked, and
@@ -52,7 +52,7 @@ the statusline shows the same line. On native Windows, Harness takes the home fr
 `HOME` before Windows Python's `USERPROFILE` lookup, so Git Bash, the hosts and
 Harness agree on it. Limits for each platform follow the installation steps.
 
-Download or clone the [Harness 0.4.1 release](https://github.com/aeiadev/harness/releases/tag/v0.4.1),
+Download or clone the [Harness 0.5.0 release](https://github.com/aeiadev/harness/releases/tag/v0.5.0),
 then run from its directory:
 
 ```bash
@@ -80,6 +80,18 @@ preserving existing hook entries. Set `CODEX_HOME` to change this destination.
 Review and trust the new hooks in Codex with `/hooks` before they can run.
 Changing a hook script requires trusting it again. The installer does not
 change trust settings or run either CLI.
+
+For a bespoke host that keeps its own settings, hooks, roles and instructions, an
+opt-in commands-only profile installs just Harness's offline commands under an
+isolated launcher and state, and registers no hook:
+
+```bash
+bash install.sh --profile commands --host claude --dry-run > plan.json
+bash install.sh --profile commands --host claude --plan plan.json
+```
+
+It needs exactly one explicit host and the default full install is unchanged.
+See [commands-only installation](docs/custom-install.md) for paths, lifecycle and limits.
 
 Claude Code also offers a plugin route. Run `/plugin marketplace add aeiadev/harness`,
 then `/plugin install harness@harness` and `/plugin install shared-roles@harness`.
@@ -160,7 +172,7 @@ restore it. Verify behavior manually in a disposable host setup before relying o
 
 ### Platform limits
 
-Router 0.4.1 pairs with Harness 0.4.1. Native Windows support starts at 0.3.1.
+Router 0.5.0 pairs with Harness 0.5.0. Native Windows support starts at 0.3.1.
 
 - On native Windows, POSIX owner checks and file modes such as 0600 and 0700 are not enforced; use Windows account and folder permissions to control access. The file modes named elsewhere in this README apply to POSIX systems.
 - Harness installs regular files and creates no symbolic links, so it needs no symlink permission. Where symlinks are not allowed, Router installs copies instead, and its upgrade and uninstall handle those copies.
@@ -533,8 +545,10 @@ private environment values. Read the `checkpoint` skill for checkpoint and compa
 rules. The project-handoff helper reports Git state without changing the tree.
 
 The shell guard inspects local shell tool payloads on Claude Code and Codex. It
-does not inspect arbitrary MCP tools, remote commands sent as quoted text to
-`ssh`, or PowerShell syntax. The shell guard recognizes known command patterns. It is a seatbelt, not a
+does not inspect arbitrary MCP tools, PowerShell syntax or opaque scripts. Remote
+commands in literal `ssh`, `scp` and `rsync` invocations are inspected only when
+an owner has bound a project policy (see Remote operation policy below);
+otherwise they are not. The shell guard recognizes known command patterns. It is a seatbelt, not a
 sandbox or a substitute for host permissions. It still passes shell code it
 cannot read as text: code spelled with `echo -e` escapes, printf octal escapes
 such as `\174`, or a here-string built from printf output. It also does not
@@ -554,12 +568,41 @@ runner. Unset the variable, or set any value other than `1`, to disable it.
 
 ## Operations and observation
 
-Version 0.4.0 includes these opt-in features. An operations brief describes a service
+Version 0.4.0 introduced these opt-in features, which remain. An operations brief describes a service
 target, allowed action, proof and readback without requiring a Git worktree. The preflight reports declared missing
 tools before dispatch; it preserves the user's named agent and its configuration.
 A separate report-only observer compares supplied resulting-state proof and never
 replays or repairs a mutation. See [operations and observation](docs/operations.md)
 for the exact profile, commands, coordinator recipe and enforcement boundaries.
+
+## Remote operation policy
+
+Version 0.5.0 adds an optional policy for literal `ssh`, `scp` and `rsync`
+invocations. It is off until an owner binds a project policy file in `report`
+mode (warn) or `enforce` mode (refuse), using the owner `policy bind|show|unbind`
+command; install never binds one. `ssh check` previews a command against the
+policy offline, without connecting or executing anything. With a bound policy,
+the full Harness shell guard inspects those invocations after its existing local
+rules, with no routine model call and no change to the default roles, skills or
+instructions. Nothing is inspected through the commands-only profile, which
+registers no hook. `ALLOW` means only that an inspected invocation matched a rule:
+it does not authenticate a server or show remote effects. Native Windows policy
+binding is refused until its path and ACL behavior is qualified. See the
+[SSH policy contract](docs/ssh-policy.md) and [operations guide](docs/operations.md).
+
+### 0.5.0 qualification status
+
+Full Router and Harness suites ran natively on Linux, macOS and Windows with
+Python 3.9 and 3.13 (six cells), with 0 failures and every skip named and
+reviewed. Windows skips the POSIX-only tests and, because 0.2 predates Windows
+support, the version-skew checks that uninstall the 0.2 tool first or expect a
+skew notice after a Harness 0.2 install. The macOS and Windows Python 3.9 cells
+skip the tests that run the 0.1 and 0.2 release installers, for the reason given
+under Test below. The required SSH integration test ran on Linux only. The PyYAML
+parity tests ran on Linux with Python 3.9 and 3.13 with PyYAML installed.
+Live-host and installed-runtime qualification, and paid
+model or connector pilots, have not been run. Static tests do not establish them, and no savings or billed-token
+claim is made.
 
 ## Offline evaluation
 
@@ -570,8 +613,12 @@ not automatic acceptance, live-host verification or an optimization claim.
 
 ## Test
 
-All repository tests run offline, use temporary directories where needed, and
-make no model calls:
+Repository tests use temporary directories where needed and make no model calls.
+They run offline by default; the real SSH tests are skipped and recorded as unrun
+unless you opt in with `SSH_FIXTURE_REQUIRED=1`, which needs a container engine
+and a prepared pinned image (see the
+[fixture README](tests/fixtures/ssh-disposable/README.md)). Preparing that image
+uses the network; the running fixture has loopback only.
 
 ```bash
 python3 tests/run_all.py
